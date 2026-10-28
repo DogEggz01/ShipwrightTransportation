@@ -8,7 +8,7 @@
 
 - Shipwright use same entry point as shipyard.
 - You can access to shipwright menu when there is no ship in shipyard slot, or press R on the shipyard document when there is ship in it.
-- There is 2 tab in the menu. To build ship, select the "Order tab"
+- There are 2 tab in the menu. To build ship, select the "Order tab"
 - You can build copies of vanilla ship. Modded ship currently not supported.
 - Al'ankh ship built in GRC, Aestrin ship in built in FA, Kakam and Junk in DC, Jong in Kicia bay.
 - Aside from gold, you also need to give shipwright the material he need. The deliver area will be nearby shipyard.
