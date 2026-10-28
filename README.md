@@ -37,6 +37,8 @@
 ## Ship Name
 <img width="3840" height="2160" alt="2088CD~1" src="https://github.com/user-attachments/assets/25bd4443-8204-493f-9a29-5b0c93493f5a" />
 
+<img width="3840" height="2160" alt="202610~4" src="https://github.com/user-attachments/assets/d588ff7a-c743-4efb-8f7e-96354d942ca3" />
+
 <img width="3840" height="2160" alt="205775~1" src="https://github.com/user-attachments/assets/8d9a0521-35f1-4748-b3b0-5a5b015415d8" />
 
 - When in ship list tab. Click the name on the top of right page to rename the ship.
