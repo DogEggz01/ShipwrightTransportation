@@ -17,7 +17,7 @@
 ## Storage and transport
 <img width="3840" height="2160" alt="20A74B~1" src="https://github.com/user-attachments/assets/1045e8f7-8ee1-427f-b5de-3fb4cd20d7c3" />
 
-<img width="3840" height="2160" alt="20D972~1" src="https://github.com/user-attachments/assets/645165ab-d77c-41ef-ac64-721183136b21" />=
+<img width="3840" height="2160" alt="20D972~1" src="https://github.com/user-attachments/assets/645165ab-d77c-41ef-ac64-721183136b21" />
 
 - "Store ship" button added in shipyard UI, under the "Exit shipyard" button
 - Ship list tab at shipwright menu show all the ship you currently own and their position, include your ship in storage.
