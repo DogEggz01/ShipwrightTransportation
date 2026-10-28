@@ -21,7 +21,7 @@
 
 - "Store ship" button added in shipyard UI, under the "Exit shipyard" button
 - Ship list tab at shipwright menu show all the ship you currently own and their position, include your ship in storage.
-- Ship Storage cause money, paid when you retreive it. It scales with ship size, also how many item you left on your ship when you store it.
+- Shipwright will charge storage fee, paid when you retreive it. It scales with ship size,and the item value you left on your ship when you store it.
 - Following stituation make shipwright refuse your storage request
   - An unsealed crate on board (This is mainly to avoid crate bug)
   - Have another boat on board (Leopard's tender, Dinghy on davit)
