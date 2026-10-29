@@ -31,9 +31,10 @@
 <img width="3840" height="2160" alt="209B0D~1" src="https://github.com/user-attachments/assets/a0cb43ae-f6da-4a1a-8921-4595556c6ca7" />
 
 - When your ship is in storage, you can transport your ship to other shipyard's storage.
-  - It support Chronos shipyard add by The Old Chronian mod
+- It's cheapest if you transport ship stored from local shipyard. Ship that is not in your current shipyard will cost more to transport.
+- You can also transport ship that is not stored, but it will require shipyard to send out a ship to tow it.
+- Towing takes much more time and cost a lot more, and the crew will took your open crated and your item in it.
 - Aside from transport fee, it also charge a percentage of total item value on your ship. (Yep you can use this to transport cargo)
-
 ## Ship Name
 <img width="3840" height="2160" alt="2088CD~1" src="https://github.com/user-attachments/assets/25bd4443-8204-493f-9a29-5b0c93493f5a" />
 
