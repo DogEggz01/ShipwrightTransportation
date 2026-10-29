@@ -28,7 +28,7 @@
   - Ship is used for loan (From Economic overhaul)
   - Ship is towing/tied to another ship (Towing Boat mod)
 
-<img width="3840" height="2160" alt="209B0D~1" src="https://github.com/user-attachments/assets/a0cb43ae-f6da-4a1a-8921-4595556c6ca7" />
+<img width="3840" height="2160" alt="202610~4" src="https://github.com/user-attachments/assets/f813c64e-7887-4766-adea-5fe6ef32e686" />
 
 - When your ship is in storage, you can transport your ship to other shipyard's storage.
 - It's cheapest if you transport ship stored from local shipyard. Ship that is not in your current shipyard will cost more to transport.
