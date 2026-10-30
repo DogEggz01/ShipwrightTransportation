@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Reflection;
+using HarmonyLib;
 using UnityEngine;
 using Object = UnityEngine.Object;
 
@@ -31,7 +33,7 @@ namespace ShipwrightAndTransport
             internal int Total => (int)Math.Min(int.MaxValue, (long)TransportFee + StorageFee);
         }
 
-        // The fee is the transport (with 15% of her cargo's value) plus the storage yard's fee through the departure day: the 24
+        // The fee is the transport (with 20% of her cargo's value) plus the storage yard's fee through the departure day: the 24
         // hours of finding sailors always cross one midnight, so one day more than at booking. Booked at the yard she is stored
         // at, 0.6 a metre a mile; booked at another yard, 0.8, the transport in the ordering yard's currency and the storage in
         // her storage yard's ("charging in player's ordering shipyard currency", "Origin's storage paid at booking in storage yard
@@ -41,7 +43,7 @@ namespace ShipwrightAndTransport
             var from = Shipyards.ByName(record.shipyard) ?? orderedAt;
             var quote = new Quote { From = from, To = to, OrderedAt = orderedAt, Currency = currency, StorageCurrency = from == orderedAt ? currency : from.Currency };
             quote.Miles = Math.Max(0, ShipwrightAndTransport.Miles.BetweenShipyards(from.Name, to.Name));
-            quote.Knots = Fees.TransportKnots(record.lengthM);
+            quote.Knots = Fees.TransportKnots(record.lengthM, record.massLb, record.cargoLb);
             quote.Book = GameClock.Hours;
             quote.Depart = quote.Book + FindingSailorsHours;
             quote.Arrive = quote.Depart + Fees.SeaHours(quote.Miles, quote.Knots);
@@ -133,8 +135,8 @@ namespace ShipwrightAndTransport
 
         internal const string Booked = "It is booked for a tow.";
         internal const string Sank = "A sunk ship can't be towed.";
-        // The user's text (2026-10-29), on three lines of the scroll.
-        internal const string CratesTaken = "The tug crew has taken your\nitem in opened crate\nfor themselves";
+        // The user's handoff's text (2026-10-30), on three lines of the scroll.
+        internal const string CratesTaken = "The tug crew has taken\nthe items in your crates\nfor themselves";
 
         internal static string Reached(string name) => "The tug reached\n" + name + ".";
         internal static string Cancelled(string name) => "The tug found no\n" + name + ": the towing\nfee is paid back.";
@@ -144,14 +146,18 @@ namespace ShipwrightAndTransport
         internal struct Clock { internal double Book, Depart, Reach, PickupDue, Arrive; }
 
         // The hours as planned at booking: the pickup may come later (C), and the tow then counts from it.
-        internal static Clock Plan(double book, int tugMiles, int towMiles)
+        internal static Clock Plan(double book, int tugMiles, int towMiles, float towKnots)
         {
             var clock = new Clock { Book = book, Depart = book + WaitHours };
             clock.Reach = clock.Depart + Fees.SeaHours(tugMiles, Knots);
             clock.PickupDue = clock.Reach + WaitHours;
-            clock.Arrive = clock.PickupDue + Fees.SeaHours(towMiles, Knots);
+            clock.Arrive = clock.PickupDue + Fees.SeaHours(towMiles, towKnots);
             return clock;
         }
+
+        // Her weight slows the tow leg only, the tug's run to her stays at 8 knots ("For tugboat it only affect the towing leg,
+        // not tugboat to ship leg", the user, 2026-10-30; Fees.LoadFactor).
+        internal static float TowKnots(float massLb, float cargoLb) => Knots * Fees.LoadFactor(massLb, cargoLb);
 
         // Flat, so the sea's rise and fall doesn't count (Simple Tides moves it 1.3-4 m).
         internal static bool Beyond(double atX, double atZ, double x, double z)
@@ -182,7 +188,7 @@ namespace ShipwrightAndTransport
             return Miles.Round(d.magnitude, Miles.Timescale);
         }
 
-        // Why she can't be booked for a tow now, or null: what Store ship refuses (an opened crate aboard, cargo loading, the
+        // Why she can't be booked for a tow now, or null: what Store ship refuses (a crate holding items, cargo loading, the
         // Leopard's rowboat, a pledged ship, another boat tied to her, the field full), and a sunk or booked ship ("F. Refuse.").
         // A rented ship isn't on the list (Ships.Owned).
         internal static string Refusal(PurchasableBoat boat)
@@ -198,22 +204,27 @@ namespace ShipwrightAndTransport
             internal ShipyardInfo OrderedAt, To;
             internal Vector3 At;
             internal int Currency, TugMiles, TowMiles, TugFee, TowFee, CargoUnits;
-            internal float LengthM;
+            internal float LengthM, MassLb, CargoLb, TowKnots;
             internal Clock Hours;
             internal int Total => (int)Math.Min(int.MaxValue, (long)TugFee + TowFee);
         }
 
-        // Both legs in the ordering yard's currency at 1 a metre a mile, the tow leg with 15% of her cargo, nothing for the two
-        // days' wait (the user). Her length as Store ship measures it; her cargo as it would pack, the loose items and her cache.
+        // Both legs in the ordering yard's currency at 1 a metre a mile, the tow leg with 20% of her cargo, nothing for the two
+        // days' wait (the user). Her length as Store ship measures it; her cargo as it would pack, the loose items and her cache,
+        // its value for the fee and its weight for the tow leg's speed (TowKnots).
         internal static Quote QuoteFor(PurchasableBoat boat, ShipyardInfo orderedAt, ShipyardInfo to, int currency)
         {
             int index = Ships.IndexOf(boat);
             var quote = new Quote { OrderedAt = orderedAt, To = to, Currency = currency, At = Real(boat.transform.position) };
             quote.LengthM = Storage.LengthOf(boat, Ships.Describe(index, boat).Hull);
-            quote.CargoUnits = (int)Math.Min(int.MaxValue, (long)Storage.CargoValue(index) + Storage.CachedCargoValue(boat.GetComponent<BoatLocalItems>()));
+            var items = boat.GetComponent<BoatLocalItems>();
+            quote.CargoUnits = (int)Math.Min(int.MaxValue, (long)Storage.CargoValue(index) + Storage.CachedCargoValue(items));
+            quote.MassLb = Weights.ShipMass(boat);
+            quote.CargoLb = Weights.CargoPounds(index, items);
+            quote.TowKnots = TowKnots(quote.MassLb, quote.CargoLb);
             quote.TugMiles = MilesFrom(orderedAt.Name, boat.transform.position);
             quote.TowMiles = MilesFrom(to.Name, boat.transform.position);
-            quote.Hours = Plan(GameClock.Hours, quote.TugMiles, quote.TowMiles);
+            quote.Hours = Plan(GameClock.Hours, quote.TugMiles, quote.TowMiles, quote.TowKnots);
             float rate = Money.Rate(currency);
             quote.TugFee = Fees.TugFee(quote.LengthM, quote.TugMiles, rate);
             quote.TowFee = Fees.TransportFee(quote.LengthM, quote.TowMiles, quote.CargoUnits, rate, Fees.TowPerMetre);
@@ -233,10 +244,12 @@ namespace ShipwrightAndTransport
                 saveIndex = index, from = quote.OrderedAt.Name, to = quote.To.Name, orderedAt = quote.OrderedAt.Name, tow = true,
                 currency = quote.Currency, tugMiles = quote.TugMiles, towMiles = quote.TowMiles, tugFee = quote.TugFee, towFee = quote.TowFee,
                 cargoUnits = quote.CargoUnits, lengthM = quote.LengthM, atX = quote.At.x, atZ = quote.At.z,
+                massLb = quote.MassLb, cargoLb = quote.CargoLb,
                 bookedHour = clock.Book, departHour = clock.Depart, reachHour = clock.Reach, arriveHour = clock.Arrive,
             });
             Log.Info("Booked a tow of " + Ships.NameOf(index) + " from " + quote.OrderedAt.Name + " to " + quote.To.Name + ": the tug's " + quote.TugMiles +
-                " miles " + quote.TugFee + ", the tow's " + quote.TowMiles + " miles " + quote.TowFee + " (cargo worth " + quote.CargoUnits + " units), " +
+                " miles " + quote.TugFee + ", the tow's " + quote.TowMiles + " miles " + quote.TowFee + " (cargo worth " + quote.CargoUnits + " units; " +
+                Weights.Text(quote.MassLb, quote.CargoLb) + ", towed at " + quote.TowKnots.ToString("0.0", CultureInfo.InvariantCulture) + " knots), " +
                 Money.Short[quote.Currency] + "; she lies at (" + quote.At.x.ToString("F0", CultureInfo.InvariantCulture) + ", " +
                 quote.At.z.ToString("F0", CultureInfo.InvariantCulture) + "). The tug leaves on day " + GameClock.DayOf(clock.Depart) + ", reaches her on day " +
                 GameClock.DayOf(clock.Reach) + "; she arrives on day " + GameClock.DayOf(clock.Arrive) + " at the earliest.");
@@ -329,7 +342,7 @@ namespace ShipwrightAndTransport
         internal static float PickupDistance(float fullySunkDistance) => Math.Min(fullySunkDistance, PickupDistanceCap);
 
         // The pickup (SPEC.md §6.3): Store ship's steps without the shipyard's, as the probe ran
-        // them (the QA's Mod.PickUp, runs 20261029-182831 and -183130): opened crates destroyed (D), her cargo packed, the game's
+        // them (the QA's Mod.PickUp, runs 20261029-182831 and -183130): the items in her crates taken (D), her cargo packed, the game's
         // references to her dropped, a storage record at the destination, she moved to a parking slot. Her cargo counts at the
         // booking's value: far off, the game has packed her already, and PackCargo measures only items still loose (the probe: 0).
         private static void PickUp(TransportRecord tow, PurchasableBoat boat, double pickupHour)
@@ -340,53 +353,61 @@ namespace ShipwrightAndTransport
             // switched on (the game switches her off again out there, as after a store).
             if (!boat.gameObject.activeSelf) boat.gameObject.SetActive(true);
             var items = boat.GetComponent<BoatLocalItems>();
-            tow.cratesTaken = TakeOpenedCrates(index, items);
-            GameAccess.PackCargo(items);
+            // cratesTaken holds the items taken from 0.1.2 (the crates before; only > 0 is read). The name stays: it is saved.
+            tow.cratesTaken = TakeCrateContents(index, items);
+            GameAccess.PackCargo(items, out _);
+            Storage.LogCrates("tug pickup", index, items);
             Storage.ForgetBoat(boat.transform);
             tow.pickupHour = pickupHour;
-            tow.arriveHour = pickupHour + Fees.SeaHours(tow.towMiles, Knots);
+            tow.arriveHour = pickupHour + Fees.SeaHours(tow.towMiles, TowKnots(tow.massLb, tow.cargoLb));
             State.Save.stored.Add(new StoredShip
             {
                 saveIndex = index, shipyard = tow.to, slot = slot, dayStored = GameClock.DayOf(tow.arriveHour),
                 lengthM = tow.lengthM, feeUnits = Fees.DailyUnits(boat.price), cargoUnits = tow.cargoUnits,
+                massLb = tow.massLb, cargoLb = tow.cargoLb,
             });
             farChecks.Remove(index);
             fullLogged.Remove(index);
             Log.Info("The tug took " + Ships.NameOf(index) + " (save index " + index + ") on hour " + pickupHour.ToString("F1", CultureInfo.InvariantCulture) +
-                " to slot " + slot + (tow.cratesTaken > 0 ? ", " + tow.cratesTaken + " opened crate(s) destroyed" : "") + "; she arrives in " + tow.to +
+                " to slot " + slot + (tow.cratesTaken > 0 ? ", " + tow.cratesTaken + " item(s) in crates taken" : "") + "; she arrives in " + tow.to +
                 " on day " + GameClock.DayOf(tow.arriveHour) + ".");
             Plugin.Instance.StartCoroutine(Teleporter.Move(boat, Parking.World(State.Save.parkingField, slot), Parking.Heading, false));
         }
 
-        // D: an opened crate aboard at the pickup is destroyed with the items in it ("Destroy it", the user): loose aboard as the
-        // game destroys an item (ShipItem.DestroyItem), or packed in her cache by dropping its data (the live copies are gone,
-        // ShipItem.ProcessSaveable). Packing them with her was prone to bugs (the "tried and failed" file, "Opened crates").
-        // A crate's items needn't share its fate: unsealing gives them parent 0, not hers, so when the game packs her far off the
-        // crate goes into her cache and its items stay in the world (the tow run, 20261029-191154: 6 items left). So the opened
-        // crates are gathered from both first, then every item in one goes, wherever it is. Returns how many crates.
-        private static int TakeOpenedCrates(int index, BoatLocalItems items)
+        // D: the items in her crates at the pickup are taken, the crates and Kemy's storage furniture stay aboard, empty (the
+        // user, 2026-10-30; until 0.1.2 the opened crate went too, "Destroy it"): loose as the game destroys an item
+        // (ShipItem.DestroyItem), or packed in her cache by dropping its data (the live copies are gone, ShipItem.ProcessSaveable).
+        // Packing them with her was prone to bugs (the "tried and failed" file, "Opened crates"). Her crates holding items are
+        // gathered from her items and her cache first (Storage.FilledCrates: a crate packed far off can leave its goods in the
+        // world, the tow run 20261029-191154), then every item in one goes, wherever it is. Returns how many items.
+        private static int TakeCrateContents(int index, BoatLocalItems items)
         {
-            var crates = Storage.OpenedCrateIds(items);
-            var prefabs = SaveLoadManager.instance ? SaveLoadManager.instance.GetCurrentPrefabs() : null;
-            if (prefabs != null)
-                foreach (var prefab in prefabs)
-                {
-                    var crate = prefab && prefab.GetParentObject() == index ? prefab.GetComponent<ShipItemCrate>() : null;
-                    if (crate && Storage.IsOpenedCrate(crate.amount)) crates.Add(prefab.instanceId);
-                }
+            var crates = Storage.FilledCrates(index, items);
             if (crates.Count == 0) return 0;
-            Func<int, int, bool> taken = (id, crateId) => crates.Contains(id) || (crateId != 0 && crates.Contains(crateId));
-            var doomed = new List<ShipItem>();
+            var prefabs = SaveLoadManager.instance ? SaveLoadManager.instance.GetCurrentPrefabs() : null;
+            var byId = new Dictionary<int, SaveablePrefab>();
+            var doomed = new List<SaveablePrefab>();
             if (prefabs != null)
                 foreach (var prefab in prefabs)
                 {
-                    var item = prefab && taken(prefab.instanceId, prefab.currentCrateId) ? prefab.GetComponent<ShipItem>() : null;
-                    if (item) doomed.Add(item);
+                    if (!prefab) continue;
+                    byId[prefab.instanceId] = prefab;
+                    if (CrateRule.InCrate(new CrateRule.Item(prefab.instanceId, 0, prefab.currentCrateId), crates)) doomed.Add(prefab);
                 }
-            foreach (var item in doomed) if (item) item.DestroyItem();
+            int count = 0;
+            foreach (var prefab in doomed)
+            {
+                var item = prefab ? prefab.GetComponent<ShipItem>() : null;
+                if (!item) continue;
+                // Out of its crate first: the crate stays, and CrateInventory.LateUpdate moves every item it holds each frame.
+                var inventory = byId.TryGetValue(prefab.currentCrateId, out var crate) && crate ? crate.GetComponent<CrateInventory>() : null;
+                if (inventory) inventory.WithdrawItem(item);
+                item.DestroyItem();
+                count++;
+            }
             var cached = items ? items.GetCachedItems() : null;
-            cached?.RemoveAll(d => d != null && taken(d.instanceId, d.crateId));
-            return crates.Count;
+            if (cached != null) count += cached.RemoveAll(d => d != null && CrateRule.InCrate(new CrateRule.Item(d.instanceId, 0, d.crateId), crates));
+            return count;
         }
 
         // D's notification, a day after the tow leg started ("make this show up after start tugging leg for 1 days"); a tow
@@ -397,6 +418,94 @@ namespace ShipwrightAndTransport
             tow.cratesTold = true;
             Notify.Later(CratesTaken);
         }
+    }
+
+    // ==== Weights ====
+
+    // Her own mass and her cargo's weight, in the game's mass units, the pounds of the mission board (MissionDetailsUI), for
+    // the transport's and the tow leg's speed (Fees.LoadFactor). Both as the game adds them up for her physics.
+    internal static class Weights
+    {
+        private static readonly FieldInfo SelfMass = AccessTools.Field(typeof(BoatMass), "selfMass");
+        private static readonly FieldInfo PartsMass = AccessTools.Field(typeof(BoatMass), "partsMass");
+        private static readonly MethodInfo SailMass = AccessTools.Method(typeof(BoatMass), "GetSailMass");
+
+        // BoatMass.UpdateMass without items or the player: the hull's own body mass (selfMass, from Awake), partsMass, and
+        // again each part's active option with its masts' sails (the game counts the parts twice; as it does, so the factor
+        // matches her physics). Her body's mass if BoatMass can't be read.
+        internal static float ShipMass(PurchasableBoat boat)
+        {
+            var body = boat ? boat.GetComponent<Rigidbody>() : null;
+            var mass = boat ? boat.GetComponent<BoatMass>() : null;
+            if (!mass || SelfMass == null) return body ? body.mass : 0f;
+            try
+            {
+                float sum = (float)SelfMass.GetValue(mass) + (PartsMass != null ? (float)PartsMass.GetValue(mass) : 0f);
+                var parts = boat.GetComponent<BoatCustomParts>();
+                if (parts && parts.availableParts != null)
+                    foreach (var part in parts.availableParts)
+                    {
+                        var option = part != null ? part.GetActiveOption() : null;
+                        if (!option) continue;
+                        sum += option.mass;
+                        var mast = option.GetComponent<Mast>();
+                        if (!mast || mast.sails == null || SailMass == null) continue;
+                        foreach (var sail in mast.sails)
+                        {
+                            var s = sail ? sail.GetComponent<Sail>() : null;
+                            if (s) sum += (float)SailMass.Invoke(mass, new object[] { s });
+                        }
+                    }
+                return sum;
+            }
+            catch (Exception e)
+            {
+                Log.Warn("Reading " + boat.name + "'s mass failed: " + e.Message);
+                return body ? body.mass : 0f;
+            }
+        }
+
+        // Her cargo: the items aboard her (her parent, as Storage.CargoValue) and those in her cache (null: not read).
+        internal static float CargoPounds(int index, BoatLocalItems cache)
+        {
+            double sum = 0;
+            var prefabs = SaveLoadManager.instance ? SaveLoadManager.instance.GetCurrentPrefabs() : null;
+            if (index > 0 && prefabs != null)
+                foreach (var prefab in prefabs)
+                {
+                    var item = prefab && prefab.GetParentObject() == index ? prefab.GetComponent<ShipItem>() : null;
+                    if (item) sum += ItemPounds(item, item.amount, item.health, item.GetComponent<ShipItemSoup>());
+                }
+            var cached = cache ? cache.GetCachedItems() : null;
+            if (cached != null)
+                foreach (var data in cached)
+                {
+                    var prefab = data != null ? Storage.PrefabOf(data.prefabIndex) : null;
+                    var item = prefab ? prefab.GetComponent<ShipItem>() : null;
+                    // shortcut: a packed soup pot counts without its soup (kept in extraValues); replace if pots go as cargo.
+                    if (item) sum += ItemPounds(item, data.itemAmount, data.itemHealth, null);
+                }
+            return (float)sum;
+        }
+
+        // An item's weight as ItemRigidbody.UpdateMass sets its body's mass: its own, a crate's goods by its amount (none in an
+        // opened crate or Kemy's storage furniture, whose amount is 0 and which hold no goods prefab), a bottle's drink, tea and
+        // salt by the amount, a pot's soup.
+        private static float ItemPounds(ShipItem item, float amount, float health, ShipItemSoup soup)
+        {
+            float pounds = item.mass;
+            var crate = item as ShipItemCrate;
+            var goods = crate ? crate.GetContainedPrefab() : null;
+            var goodsItem = goods ? goods.GetComponent<ShipItem>() : null;
+            if (goodsItem) pounds += goodsItem.mass * amount;
+            if (item.GetComponent<ShipItemBottle>()) pounds += health;
+            if (item.GetComponent<ShipItemTea>() || item.GetComponent<ShipItemSalt>()) pounds += amount * 0.1f;
+            if (soup) pounds += soup.currentWater + soup.currentEnergy / 20f + soup.currentUncookedEnergy / 20f;
+            return Math.Max(0f, pounds);
+        }
+
+        internal static string Text(float massLb, float cargoLb) =>
+            "ship " + Mathf.RoundToInt(massLb) + " lb, cargo " + Mathf.RoundToInt(cargoLb) + " lb";
     }
 
     // ==== Miles ====

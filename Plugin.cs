@@ -28,7 +28,7 @@ namespace ShipwrightAndTransport
     [BepInIncompatibility(StorageGuid)]
     public sealed class Plugin : BaseUnityPlugin
     {
-        public const string Guid = "DogEggz.ShipwrightTransport", PluginName = "Shipwright and Transport", Version = "0.1.1";
+        public const string Guid = "DogEggz.ShipwrightTransport", PluginName = "Shipwright and Transport", Version = "0.1.2";
         internal const string StorageGuid = "DogEggz.ShipwrightandStorage";
 
         internal static Plugin Instance;
@@ -225,11 +225,14 @@ namespace ShipwrightAndTransport
         // the cargo where she lay before she was moved, and it stayed there. UnpackWhenNear clears the mark at take-out.
         // A cache with items not spawned yet stays as it is (a second call would replace it with what is aboard now; Store ship
         // refuses such a ship, Storage.RefusalToStore); an empty one (HasLocalItems only means "not null") is packed again.
-        // No opened crate is aboard (refused too), so every item packed is a whole: loose goods, sealed crates, tools. An item
-        // that still counts as aboard her but lies in a crate off her stays with its crate (StaysWithCrate). Returns the value of
-        // the cargo packed (Storage.CargoValue), for her fees.
-        internal static int PackCargo(BoatLocalItems items)
+        // No crate of hers holds items (refused too, Storage.FilledCrates), so every item packed is a whole: loose goods,
+        // sealed crates, empty crates and storage furniture, tools. An item that still counts as aboard her but lies in a crate
+        // off her stays with its crate (StaysWithCrate). Returns the value of the cargo packed (Storage.CargoValue), for her fees,
+        // and its weight (Weights.CargoPounds), for her speed. One method, no overload: the QA's watch (and any mod) finds it by
+        // name (an overload made AccessTools.Method ambiguous and stopped the QA plugin, run 20261030-172350).
+        internal static int PackCargo(BoatLocalItems items, out float pounds)
         {
+            pounds = 0f;
             if (!items) return 0;
             int value = 0;
             try
@@ -239,7 +242,9 @@ namespace ShipwrightAndTransport
                 if (!CacheHoldsItems(items))
                 {
                     LeaveWithTheirCrates(index);
+                    FreeCrateScreen(index);
                     value = Storage.CargoValue(index);
+                    pounds = Weights.CargoPounds(index, null);
                     CacheItems.Invoke(items, null);
                 }
                 items.SetItemsLoaded(true);
@@ -292,6 +297,25 @@ namespace ShipwrightAndTransport
             }
             Log.Info("Left " + leaving.Count + " item(s) in their crates off " + Ships.NameOf(index) + ", not packed with her: " + string.Join(", ", names.ToArray()) + ".");
         }
+
+        // The crate screen keeps its place on a child of the crate last opened (CrateInventoryUI.ShowInventory parents its
+        // localPosTracker to the crate) and makes a new one only while it shows: destroyed with a packed crate, the next crate
+        // opened threw (Shipwright and Storage 0.1.3's test, its GameAccess.EmptyPackedCrates). An empty crate is packed from
+        // 0.1.2, most likely the one just emptied, so the tracker leaves any crate of hers first.
+        private static void FreeCrateScreen(int index)
+        {
+            var tracker = CrateInventoryUI.instance ? CrateUITracker?.GetValue(CrateInventoryUI.instance) as Transform : null;
+            var prefabs = SaveLoadManager.instance ? SaveLoadManager.instance.GetCurrentPrefabs() : null;
+            if (!tracker || !tracker.parent || prefabs == null) return;
+            foreach (var prefab in prefabs)
+            {
+                if (!prefab || prefab.GetParentObject() != index || !prefab.GetComponent<CrateInventory>() || !tracker.IsChildOf(prefab.transform)) continue;
+                tracker.SetParent(null, true);
+                return;
+            }
+        }
+
+        private static readonly FieldInfo CrateUITracker = AccessTools.Field(typeof(CrateInventoryUI), "localPosTracker");
 
         // An item leaves the ship it counts aboard for good, as the game's own OnEnterInventory makes one leave: the boarding
         // trigger it last stood in is forgotten first (in a crate its colliders are off, so it never hears it left that trigger,
@@ -497,9 +521,10 @@ namespace ShipwrightAndTransport
         internal static int DailyStorage(int price, float rate) => Coins(DailyUnits(price), rate);
 
         // Her cargo in the fees (SPEC.md §4.6, the user: "Add 15% of all item's value on ship to transportation fee, and
-        // 1% as storage fee (daily)"). cargoUnits is the sum of the items' ShipItem.value aboard her, the game's base value, in
-        // the units the fees use (an item's coins are its value × the rate, as a shop's). Each share is rounded to whole units.
-        internal const float CargoDailyShare = 0.01f, CargoTransportShare = 0.15f;
+        // 1% as storage fee (daily)"; 0.1.2: "change the cargo value portion in transport fee to 20%"). cargoUnits is the sum of
+        // the items' ShipItem.value aboard her, the game's base value, in the units the fees use (an item's coins are its value
+        // × the rate, as a shop's). Each share is rounded to whole units.
+        internal const float CargoDailyShare = 0.01f, CargoTransportShare = 0.2f;
 
         internal static int CargoDailyUnits(int cargoUnits) => Round((float)Math.Max(0, cargoUnits) * CargoDailyShare);
 
@@ -531,7 +556,7 @@ namespace ShipwrightAndTransport
             return Round(perMile * miles);
         }
 
-        // With her cargo: 15% of its value on top of the ship's units (a transport, or a tow's tow leg).
+        // With her cargo: 20% of its value on top of the ship's units (a transport, or a tow's tow leg).
         internal static int TransportFee(float lengthM, int miles, int cargoUnits, float rate, float perMetre) =>
             Coins(TransportUnits(lengthM, miles, perMetre) + CargoTransportUnits(cargoUnits), rate);
 
@@ -556,6 +581,22 @@ namespace ShipwrightAndTransport
             float feet = lengthM < CarriedBelowMetres ? 100f : lengthM * FeetPerMetre;
             return 0.7f * 1.34f * (float)Math.Sqrt(feet);
         }
+
+        // Loaded, slower (the user, 2026-10-30: "If no weight it's as current. The more it load the slower it gets"). The game's
+        // sails push a hull with a force (Sail.ApplyForce, ForceMode.Force) and the water's drag slows it by k·v³ + 2k·v whatever
+        // its mass (Crest's BoatProbes, ForceMode.Acceleration; HullDrag), so at a steady speed v³ goes as 1 ÷ mass, and its
+        // linear parts a little more: the knots × (M ÷ (M + cargo))^0.37, M her own mass (Weights.ShipMass), at least half. The
+        // exponent as sailed (SPEC.md §6.1, the probe run 20261030-195201: the Cog, Sanbuq and Brig empty and loaded, 0.36-0.40,
+        // 0.372 fitted; the user: "Yes, use 0.37"; ⅓ before). A boat a carrier takes isn't slowed; no cargo, or no mass
+        // measured (a record from before 0.1.2), keeps the speed.
+        internal const float SlowestLoadFactor = 0.5f;
+        internal const double LoadExponent = 0.37;
+
+        internal static float LoadFactor(float massLb, float cargoLb) =>
+            massLb <= 0f || cargoLb <= 0f ? 1f : Math.Max(SlowestLoadFactor, (float)Math.Pow(massLb / (massLb + cargoLb), LoadExponent));
+
+        internal static float TransportKnots(float lengthM, float massLb, float cargoLb) =>
+            TransportKnots(lengthM) * (lengthM < CarriedBelowMetres ? 1f : LoadFactor(massLb, cargoLb));
 
         internal static double SeaHours(int miles, float knots) => knots > 0f ? miles / (double)knots : 0.0;
 
@@ -1251,7 +1292,8 @@ namespace ShipwrightAndTransport
 
     // A ship stored at a shipyard (§5). slot is her parking slot, or -1 for a finished copy never taken out (§7.3).
     // feeUnits is her ship's daily fee in units; cargoUnits the value of the cargo packed with her at the store (§4.6, Fees),
-    // 0 for a copy just built.
+    // 0 for a copy just built. massLb and cargoLb (0.1.2): her own mass and her cargo's weight then (Weights), for her
+    // transport's speed; 0 in a record from before, and for a copy just built, which keeps the speed (Fees.LoadFactor).
     [Serializable]
     public sealed class StoredShip
     {
@@ -1262,6 +1304,7 @@ namespace ShipwrightAndTransport
         public float lengthM;
         public int feeUnits;
         public int cargoUnits;
+        public float massLb, cargoLb;
     }
 
     // A booked transport (§6). The storage record stays at the origin until she arrives. orderedAt: the shipyard that booked
@@ -1270,7 +1313,8 @@ namespace ShipwrightAndTransport
     // leaves at departHour; it reaches her at reachHour, waits a day, and picks her up once nobody is near (pickupHour, -1
     // until then; nearHour is the last check that found the player near her after the day's wait); arriveHour is set again
     // from the pickup. Both legs are paid in `currency`; towFee is paid back if she leaves her place at booking (atX, atZ,
-    // real coordinates: the floating origin's shift taken out). Her length and cargo are measured at booking.
+    // real coordinates: the floating origin's shift taken out). Her length and cargo (its value, and from 0.1.2 its weight
+    // with her own mass, for the tow leg's speed) are measured at booking.
     [Serializable]
     public sealed class TransportRecord
     {
@@ -1279,7 +1323,7 @@ namespace ShipwrightAndTransport
         public double bookedHour, departHour, arriveHour;
         public bool tow;
         public int currency, tugMiles, towMiles, tugFee, towFee, cargoUnits;
-        public float lengthM, atX, atZ;
+        public float lengthM, atX, atZ, massLb, cargoLb;
         public double reachHour, pickupHour = -1, nearHour = -1;
         public bool reachedTold, cratesTold;
         public int cratesTaken;
@@ -1476,6 +1520,7 @@ namespace ShipwrightAndTransport
             Run("restoring copies", CopyEngine.RestoreAll);
             Run("transport arrivals", () => Transport.Tick(true));
             Run("order completions", () => Orders.Tick(true));
+            if (Log.Verbose) Run("crate check", () => Plugin.Instance.StartCoroutine(Storage.LogCratesAfterLoad()));
         }
 
         private static bool Read()

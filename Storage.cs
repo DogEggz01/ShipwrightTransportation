@@ -70,10 +70,9 @@ namespace ShipwrightAndTransport
             int index = Ships.IndexOf(boat);
             if (!tow && Transport.RecordOf(index) != null) return Tow.Booked;
             var items = boat.GetComponent<BoatLocalItems>();
-            int opened = OpenedCratesAboard(index) + (tow ? OpenedCratesCached(items) : 0);
-            if (opened > 0) return OpenedCrates(opened);
-            // Her cache still holds items the game hasn't unpacked: the opened-crate check can't see inside it, and packing her
-            // again would replace it.
+            int filled = FilledCrates(index, tow ? items : null).Count;
+            if (filled > 0) return FilledCratesText(filled);
+            // Her cache still holds items the game hasn't unpacked: packing her again would replace it.
             if (GameState.loadingBoatLocalItems || (!tow && GameAccess.CacheHoldsItems(items))) return CargoLoading;
             if (index == 212) return "This boat stays with\nthe Leopard.";
             if (Compat.EconomyOverhaul.IsPledged(index)) return "Repay the loan first.";
@@ -85,27 +84,62 @@ namespace ShipwrightAndTransport
 
         internal const string CargoLoading = "Cargo is still loading.";
 
-        internal static string OpenedCrates(int count) =>
-            count == 1 ? "Take the opened crate\noff the ship first." : "Take the " + count + " opened crates\noff the ship first.";
+        internal static string FilledCratesText(int count) =>
+            count == 1 ? "Take the items out of\nthe crate first." : "Take the items out of\nthe " + count + " crates first.";
 
-        // An opened crate: one the player unsealed, its goods now items in it (ShipItemCrate.UnsealCrate takes the amount to 0;
-        // a sealed crate counts its goods in its amount). In the game only ShipItemCrate has a CrateInventory.
-        internal static bool IsOpenedCrate(float amount) => amount < 1f;
-
-        // Opened crates aboard her refuse the store (the user, 2026-10-27): packing a crate's items apart from it was prone to
-        // bugs the game's crate handling makes (ShipwrightAndTransport_FAILED.md, "Opened crates").
-        internal static int OpenedCratesAboard(int index)
+        // Crates of hers that hold items refuse the store and the tow (the user, 2026-10-30; before 0.1.2 every opened crate
+        // did, which caught Kemy's Furniture's storage pieces, crates whose amount stays 0 even empty): packing a crate's items
+        // was prone to bugs the game's crate handling makes (ShipwrightAndTransport_FAILED.md, "Opened crates"); an empty crate
+        // packs as any item. Hers: loaded aboard her, or packed in her cache (null: not read). An item is in a crate by its
+        // crate id only (CrateInventory.InsertItem), wherever it lies: unsealing gives a crate's goods a parent not hers, so when
+        // the game packs her far off the crate goes into her cache and its goods stay in the world (the tow run 20261029-191154).
+        internal static HashSet<int> FilledCrates(int index, BoatLocalItems cache)
         {
+            var hers = new HashSet<int>();
+            var items = new List<CrateRule.Item>();
+            if (index <= 0) return new HashSet<int>();
             var prefabs = SaveLoadManager.instance ? SaveLoadManager.instance.GetCurrentPrefabs() : null;
-            if (index <= 0 || prefabs == null) return 0;
-            int count = 0;
-            foreach (var prefab in prefabs)
-            {
-                if (!prefab || prefab.GetParentObject() != index) continue;
-                var crate = prefab.GetComponent<ShipItemCrate>();
-                if (crate && IsOpenedCrate(crate.amount)) count++;
-            }
-            return count;
+            if (prefabs != null)
+                foreach (var prefab in prefabs)
+                {
+                    if (!prefab) continue;
+                    items.Add(new CrateRule.Item(prefab.instanceId, prefab.GetParentObject(), prefab.currentCrateId));
+                    if (prefab.GetParentObject() == index) hers.Add(prefab.instanceId);
+                }
+            var cached = cache ? cache.GetCachedItems() : null;
+            if (cached != null)
+                foreach (var data in cached)
+                    if (data != null) { items.Add(new CrateRule.Item(data.instanceId, index, data.crateId)); hers.Add(data.instanceId); }
+            return CrateRule.FilledCrates(hers, items);
+        }
+
+        // 3 s after a load, once the game's load coroutine has put items back in their crates by id (ShipItem's start).
+        internal static IEnumerator LogCratesAfterLoad()
+        {
+            yield return new WaitForSecondsRealtime(3f);
+            foreach (var ship in Ships.Owned())
+                if (ship.Boat) LogCrates("after load", ship.Index, ship.Boat.GetComponent<BoatLocalItems>());
+        }
+
+        // For the tests (the user's handoff, kept at Debug): the items in her crates, loaded or in her cache. After a store,
+        // tow or take-out of a ship whose crates were empty: "0 item(s) in 0 crate(s)".
+        internal static void LogCrates(string when, int index, BoatLocalItems cache)
+        {
+            if (!Log.Verbose || index <= 0) return;
+            var crates = FilledCrates(index, cache);
+            var found = new List<string>();
+            var prefabs = SaveLoadManager.instance ? SaveLoadManager.instance.GetCurrentPrefabs() : null;
+            if (prefabs != null)
+                foreach (var prefab in prefabs)
+                    if (prefab && CrateRule.InCrate(new CrateRule.Item(prefab.instanceId, 0, prefab.currentCrateId), crates))
+                        found.Add(prefab.name + " in " + prefab.currentCrateId);
+            var cached = cache ? cache.GetCachedItems() : null;
+            if (cached != null)
+                foreach (var data in cached)
+                    if (data != null && CrateRule.InCrate(new CrateRule.Item(data.instanceId, 0, data.crateId), crates))
+                        found.Add("packed " + data.instanceId + " in " + data.crateId);
+            Log.Debug("Crate check (" + when + ", " + Ships.NameOf(index) + "): " + found.Count + " item(s) in " + crates.Count + " crate(s)" +
+                (found.Count > 0 ? ": " + string.Join(", ", found.ToArray()) : "") + ".");
         }
 
         // The items the game packed into her cache: each item's prefab from the game's directory (an item in a cache is data
@@ -132,23 +166,7 @@ namespace ShipwrightAndTransport
             return (int)Math.Min(int.MaxValue, sum);
         }
 
-        // Opened crates in her cache: a crate prefab packed with less than one of its goods (IsOpenedCrate).
-        internal static int OpenedCratesCached(BoatLocalItems items) => OpenedCrateIds(items).Count;
-
-        internal static HashSet<int> OpenedCrateIds(BoatLocalItems items)
-        {
-            var ids = new HashSet<int>();
-            var cached = items ? items.GetCachedItems() : null;
-            if (cached == null) return ids;
-            foreach (var data in cached)
-            {
-                var prefab = data != null ? PrefabOf(data.prefabIndex) : null;
-                if (prefab && prefab.GetComponent<ShipItemCrate>() && IsOpenedCrate(data.itemAmount)) ids.Add(data.instanceId);
-            }
-            return ids;
-        }
-
-        private static GameObject PrefabOf(int prefabIndex)
+        internal static GameObject PrefabOf(int prefabIndex)
         {
             var directory = PrefabsDirectory.instance ? PrefabsDirectory.instance.directory : null;
             return directory != null && prefabIndex >= 0 && prefabIndex < directory.Length ? directory[prefabIndex] : null;
@@ -208,10 +226,14 @@ namespace ShipwrightAndTransport
             yard.DischargeShip();
             yield return null;
             // Her cargo's value counts in her fees from now on; it is packed with her, so it can't change while she is stored.
-            record.cargoUnits = GameAccess.PackCargo(boat.GetComponent<BoatLocalItems>());
+            var items = boat.GetComponent<BoatLocalItems>();
+            record.massLb = Weights.ShipMass(boat);
+            record.cargoUnits = GameAccess.PackCargo(items, out record.cargoLb);
+            LogCrates("store", index, items);
             ForgetBoat(boat.transform);
             State.Save.stored.Add(record);
-            Log.Info("Stored " + name + " (save index " + index + ") at " + info.Name + ", slot " + slot + ", cargo worth " + record.cargoUnits + " units.");
+            Log.Info("Stored " + name + " (save index " + index + ") at " + info.Name + ", slot " + slot + ", cargo worth " + record.cargoUnits + " units, " +
+                Weights.Text(record.massLb, record.cargoLb) + ".");
             yield return Teleporter.Move(boat, Parking.World(State.Save.parkingField, slot), Parking.Heading, false);
         }
 
@@ -318,6 +340,10 @@ namespace ShipwrightAndTransport
             if (!boat) yield break;
             GameAccess.UnpackWhenNear(boat.GetComponent<BoatLocalItems>());
             GameAccess.RefreshHorizon(boat);
+            // After the game's own re-insert of crate items, two frames after they spawn.
+            if (!Log.Verbose) yield break;
+            yield return new WaitForSecondsRealtime(3f);
+            if (boat) LogCrates("take-out", Ships.IndexOf(boat), boat.GetComponent<BoatLocalItems>());
         }
 
         // As vanilla CancelOrder rebuilds the rig (LoadData of GetData), and 0.39's purchase resets the jib hinges.
@@ -872,7 +898,8 @@ namespace ShipwrightAndTransport
     // steps), and the physics pushed the crate away from it: up to 4.75 m along her deck, or off a cutter (Shipwright and
     // Storage 0.1.3's in-game test, a model ship in a Scroll Shelf). A copy in play can carry an opened crate, and after a load
     // her restored cache unpacks like this, so each item of a crate goes into it as soon as it is loaded. Every other ship
-    // unpacks as in vanilla: Store ship refuses a ship with an opened crate aboard, so a stored ship's cache holds none (until
+    // unpacks as in vanilla: Store ship refuses a ship with a crate holding items, so a stored ship's cache holds no crate's
+    // items, only empty crates (until
     // Shipwright and Storage 0.1.7 the take-out did this too).
     // Since 0.39.1 that load coroutine also holds every item with a crate ID (attached, colliders off, inStove) before it
     // looks for the crate, and only the crate's InsertItem or WithdrawItem ends the hold: an item whose crate isn't in the

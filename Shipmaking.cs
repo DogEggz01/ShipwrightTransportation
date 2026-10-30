@@ -691,12 +691,41 @@ namespace ShipwrightAndTransport
             return null;
         }
 
+        // A ship's deck (walk collider). The scene sets BoatRefs.walkCol on every vanilla hull but the Kakam (90), whose field
+        // is empty; the game itself finds a deck through the ship's embark colliders (BoatEmbarkCollider.walkCollider), which
+        // agree with BoatRefs wherever it is set. ShipyardExpansion fills the Kakam's field, so only without it was her
+        // template missing (run 20261030-195201).
+        internal static Transform DeckOf(GameObject boat)
+        {
+            if (!boat) return null;
+            var refs = boat.GetComponent<BoatRefs>();
+            var embarkDecks = new List<Transform>();
+            foreach (var embark in boat.GetComponentsInChildren<BoatEmbarkCollider>(true))
+                if (embark && embark.walkCollider) embarkDecks.Add(embark.walkCollider);
+            return DeckRule(refs && refs.walkCol ? refs.walkCol : null, embarkDecks);
+        }
+
+        // BoatRefs' deck when set; else the one deck all the embark colliders name (none, or two different, is no deck).
+        internal static T DeckRule<T>(T refsDeck, IEnumerable<T> embarkDecks) where T : class
+        {
+            if (refsDeck != null) return refsDeck;
+            T found = null;
+            foreach (var deck in embarkDecks)
+            {
+                if (deck == null) continue;
+                if (found == null) found = deck;
+                else if (!found.Equals(deck)) return null;
+            }
+            return found;
+        }
+
         private static HullTemplate Capture(int hull)
         {
             var live = Original(hull);
             var refs = live ? live.GetComponent<BoatRefs>() : null;
-            if (!refs || !refs.walkCol || !refs.boatModel) { Log.Warn("Copies: hull " + hull + " was not found complete; it can't be copied."); return null; }
-            Transform deck = refs.walkCol, deckParent = deck.parent;
+            var liveDeck = live ? DeckOf(live.gameObject) : null;
+            if (!refs || !liveDeck || !refs.boatModel) { Log.Warn("Copies: hull " + hull + " was not found complete; it can't be copied."); return null; }
+            Transform deck = liveDeck, deckParent = deck.parent;
             Vector3 deckPosition = deck.localPosition, deckScale = deck.localScale;
             Quaternion deckRotation = deck.localRotation;
             var mooring = live.GetComponent<BoatMooringRopes>();
@@ -719,6 +748,13 @@ namespace ShipwrightAndTransport
             root.SetActive(false);
             root.name = live.gameObject.name;
             var copyRefs = root.GetComponent<BoatRefs>();
+            // The Kakam's empty field: the template's own deck (her embark colliders were remapped to it), so that each copy
+            // gets hers and the code below and at spawning finds it.
+            if (copyRefs && !copyRefs.walkCol)
+            {
+                copyRefs.walkCol = DeckOf(root);
+                Log.Info("Copies: the " + root.name + " template's BoatRefs had no deck; given hers from her embark colliders (" + (copyRefs.walkCol ? copyRefs.walkCol.name : "none") + ").");
+            }
             var copyMooring = root.GetComponent<BoatMooringRopes>();
             if (copyMooring) { copyMooring.mooringFront = null; copyMooring.mooringBack = null; }
             // GPButtonTrapdoor.Awake added a "trapdoor" box to the original's deck; the copy's Awake adds its own.
@@ -1137,6 +1173,17 @@ namespace ShipwrightAndTransport
             return owners;
         }
 
+        // An item in a crate: its crate id names another item.
+        internal static bool InCrate(Item item, ICollection<int> crates) => item.Crate != 0 && item.Crate != item.Id && crates.Contains(item.Crate);
+
+        // Of the crates `hers` (by instanceId), those some item lies in (Storage.FilledCrates); the crates, not their items.
+        internal static HashSet<int> FilledCrates(ICollection<int> hers, IEnumerable<Item> items)
+        {
+            var filled = new HashSet<int>();
+            foreach (var item in items) if (InCrate(item, hers)) filled.Add(item.Crate);
+            return filled;
+        }
+
         // Code review R1: an item going to the vanilla save (owner 0) whose own parent is a copy's (1000 and up, none of which
         // the vanilla save holds) lies in a crate off her. It leaves her: aboard its crate's ship or house when the vanilla save
         // holds that (1-999), else in the world (-1). Null for every other item: it keeps its parent.
@@ -1335,7 +1382,7 @@ namespace ShipwrightAndTransport.Compat
                 foreach (var go in added)
                 {
                     if (!go) continue;
-                    var counterpart = Counterpart(go.transform, original.transform, template.transform, originalRefs.walkCol, templateRefs.walkCol);
+                    var counterpart = Counterpart(go.transform, original.transform, template.transform, CopyEngine.DeckOf(original), templateRefs.walkCol);
                     if (!counterpart) { missed++; continue; }
                     var mast = counterpart.GetComponent<Mast>();
                     if (mast && templateRefs.masts != null)
