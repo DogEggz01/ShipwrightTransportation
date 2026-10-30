@@ -23,7 +23,7 @@
 - Ship list tab at shipwright menu show all the ship you currently own and their position, include your ship in storage.
 - Shipwright will charge storage fee, paid when you retreive it. It scales with ship size,and the item value you left on your ship when you store it.
 - Following stituation make shipwright refuse your storage request
-  - An unsealed crate on board (This is mainly to avoid crate bug)
+  - An crate with items on board (This is mainly to avoid crate bug)
   - Have another boat on board (Leopard's tender, Dinghy on davit)
   - Ship is used for loan (From Economic overhaul)
   - Ship is towing/tied to another ship (Towing Boat mod)
@@ -33,8 +33,9 @@
 - When your ship is in storage, you can transport your ship to other shipyard's storage.
 - It's cheapest if you transport ship stored from local shipyard. Ship that is not in your current shipyard will cost more to transport.
 - You can also transport ship that is not stored, but it will require shipyard to send out a ship to tow it.
-- Towing takes much more time and cost a lot more, and the crew will took your unsealed crate and your item in it.
+- Towing takes much more time and cost a lot more, and the crew will took your all your items in crate.
 - Aside from transport fee, it also charge a percentage of total item value on your ship. (Yep you can use this to transport cargo)
+- Transport speed will be affect by the cargo weight on board.
 ## Ship Name
 <img width="3840" height="2160" alt="2088CD~1" src="https://github.com/user-attachments/assets/25bd4443-8204-493f-9a29-5b0c93493f5a" />
 
