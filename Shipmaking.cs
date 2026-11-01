@@ -898,6 +898,37 @@ namespace ShipwrightAndTransport
             return null;
         }
 
+        // A sold copy (SPEC.md §5.10): her record goes, so she is neither saved nor built at the next load. A copy taken out
+        // before is a live ship in her parking slot: switched off for good there (root, deck, anchor), out of the game's
+        // switcher, so nothing shows her again, and out of the save registry, so no list, fee or save sees her or her packed
+        // cargo. Not destroyed: other mods may hold references to her as to any parked ship, and would throw on a destroyed one.
+        internal static void Retire(CopyRecord copy)
+        {
+            if (copy == null) return;
+            State.Save.copies.Remove(copy);
+            int block = IndexOf(copy.k);
+            var boat = Ships.BoatOf(block);
+            if (boat)
+            {
+                var go = boat.gameObject;
+                var switcher = Object.FindObjectOfType<BoatHorizonPerformanceSwitcher>();
+                var horizon = FindHorizon(go);
+                if (switcher && horizon && switcher.horizons != null && Array.IndexOf(switcher.horizons, horizon) >= 0)
+                    switcher.horizons = Array.FindAll(switcher.horizons, h => h != horizon);
+                var refs = go.GetComponent<BoatRefs>();
+                if (refs && refs.walkCol) refs.walkCol.gameObject.SetActive(false);
+                var mooring = go.GetComponent<BoatMooringRopes>();
+                if (mooring && mooring.anchor) mooring.anchor.gameObject.SetActive(false);
+                var saveable = go.GetComponent<SaveableObject>();
+                if (saveable) saveable.extraSetting = false;
+                go.SetActive(false);
+            }
+            var objects = SaveLoadManager.instance ? SaveLoadManager.instance.GetCurrentObjects() : null;
+            if (objects != null)
+                for (int i = block; i < block + BlockSize && i < objects.Length; i++) objects[i] = null;
+            Log.Info("Copies: copy " + copy.k + " (hull " + copy.hull + ") sold" + (boat ? "; switched off where she lay, gone from the next load." : "; she was never built."));
+        }
+
         // A new copy record: the next k, never reused. The number is given at completion (decision 50).
         internal static CopyRecord NewRecord(int hull)
         {

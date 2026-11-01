@@ -135,6 +135,10 @@ namespace ShipwrightAndTransport
 
         internal const string Booked = "It is booked for a tow.";
         internal const string Sank = "A sunk ship can't be towed.";
+        // The user (2026-10-31): no tow of a ship near enough to sail in, so that she isn't towed by mistake instead of stored or
+        // transported; nearer than BookingDistance (1.5 km since 2026-11-01). The user's words (2026-11-01), on two
+        // lines of the scroll ("can you make it show in 2 line? if it fit notification banner").
+        internal const string InSight = "Ship is too close to tow,\nstore it in shipyard first";
         // The user's handoff's text (2026-10-30), on three lines of the scroll.
         internal const string CratesTaken = "The tug crew has taken\nthe items in your crates\nfor themselves";
 
@@ -189,13 +193,14 @@ namespace ShipwrightAndTransport
         }
 
         // Why she can't be booked for a tow now, or null: what Store ship refuses (a crate holding items, cargo loading, the
-        // Leopard's rowboat, a pledged ship, another boat tied to her, the field full), and a sunk or booked ship ("F. Refuse.").
-        // A rented ship isn't on the list (Ships.Owned).
+        // Leopard's rowboat, a pledged ship, another boat tied to her, the field full), a sunk or booked ship ("F. Refuse."),
+        // and a ship the game shows the player (InSight). A rented ship isn't on the list (Ships.Owned).
         internal static string Refusal(PurchasableBoat boat)
         {
             if (Transport.RecordOf(Ships.IndexOf(boat)) != null) return Booked;
             var damage = boat.GetComponent<BoatDamage>();
             if (damage && damage.sunk) return Sank;
+            if (TooNear(boat)) return InSight;
             return Storage.RefusalToStore(boat, true);
         }
 
@@ -340,6 +345,16 @@ namespace ShipwrightAndTransport
         }
 
         internal static float PickupDistance(float fullySunkDistance) => Math.Min(fullySunkDistance, PickupDistanceCap);
+
+        // The booking's limit (the user, 2026-11-01: "reduce the towing limit to 1.5 km"; until then, while the game showed her):
+        // a ship nearer than this to the player can't be booked for a tow. The pickup still waits until she is out of sight.
+        internal const float BookingDistance = 1500f;
+
+        internal static bool TooNear(PurchasableBoat boat)
+        {
+            var player = Refs.observerMirror;
+            return player && Vector3.Distance(boat.transform.position, player.transform.position) < BookingDistance;
+        }
 
         // The pickup (SPEC.md §6.3): Store ship's steps without the shipyard's, as the probe ran
         // them (the QA's Mod.PickUp, runs 20261029-182831 and -183130): the items in her crates taken (D), her cargo packed, the game's

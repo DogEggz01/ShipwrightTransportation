@@ -165,6 +165,48 @@ namespace ShipwrightAndTransport
         internal static float BottomOf(Mesh mesh, float scale) => mesh ? (mesh.bounds.extents.y - mesh.bounds.center.y) * scale : 0.25f * scale;
     }
 
+    // Where the plates are sold (§9.10; the user, 2026-11-01: "make nameplate only sold in it's region, so each region 2, and add
+    // a toggle option that after visiting each region, you can unlock the nameplate and can buy it at other region"): a shipyard
+    // sells its own region's two; with [Plates] Unlock visited regions on, also those of every region visited. A visit is to a
+    // shipyard (the user: "you need to visit shipyard to consider visited"): its documents looked at, or the board opened there.
+    internal static class PlateRegions
+    {
+        internal const int AllRegions = 0b111;
+        private static readonly string[] Names = { "Al'Ankh", "Emerald", "Aestrin" };
+
+        internal static bool UnlockVisited => Plugin.UnlockVisitedPlates != null && Plugin.UnlockVisitedPlates.Value;
+
+        internal static bool Visited(int mask, int region) => region >= 0 && region < Names.Length && (mask & (1 << region)) != 0;
+
+        internal static int Mark(int mask, int region) => region >= 0 && region < Names.Length ? mask | (1 << region) : mask;
+
+        // The styles a shipyard of yardRegion sells, as indices into PlateData.Styles, in its order.
+        internal static List<int> SoldAt(int yardRegion, int visited, bool unlock)
+        {
+            var sold = new List<int>();
+            for (int i = 0; i < PlateData.Styles.Length; i++)
+            {
+                int region = PlateData.Styles[i].Region;
+                if (region == yardRegion || unlock && Visited(visited, region)) sold.Add(i);
+            }
+            return sold;
+        }
+
+        internal static List<int> SoldAt(Shipyard yard) => SoldAt(yard.region, State.Save.visitedRegions, UnlockVisited);
+
+        // Marks the shipyard's region (Shipyard.region) visited. Called every frame the documents are looked at, so the name is
+        // looked up only for a new region. Any shipyard counts, one a mod adds too: it is in its region all the same.
+        internal static void Visit(Shipyard yard)
+        {
+            if (!yard || State.Off) return;
+            int mask = Mark(State.Save.visitedRegions, yard.region);
+            if (mask == State.Save.visitedRegions) return;
+            State.Save.visitedRegions = mask;
+            Log.Info("Visited the " + Names[yard.region] + " region (" + (Shipyards.PortOf(yard) ?? yard.name) + " shipyard); its name plates are sold at every shipyard " +
+                (UnlockVisited ? "now." : "once [Plates] Unlock visited regions is on."));
+        }
+    }
+
     // ==== PlateData ====
 
     // A plate style (assets\plates\plates.json → styles, made by BuildTools\make_plates.py; SPEC.md §9): its prefab
@@ -178,6 +220,8 @@ namespace ShipwrightAndTransport
     internal sealed class PlateStyle
     {
         internal string Key, Title;
+        // The region that sells it (§9.10): Shipyard.region and PortRegion alike, 0 Al'Ankh, 1 Emerald, 2 Aestrin.
+        internal int Region;
         internal int PrefabIndex, FaceSlot, CanvasWidth, CanvasHeight, BasePixels;
         internal int LettersSlot = -1;
         internal int[] LettersRect;
@@ -238,40 +282,40 @@ namespace ShipwrightAndTransport
         {
             new PlateStyle
             {
-                Key = "alankh", Title = "Al'Ankh Copper Star", PrefabIndex = 650, FaceSlot = 0, Ornaments = true,
+                Key = "alankh", Region = 0, Title = "Al'Ankh Copper Star", PrefabIndex = 650, FaceSlot = 0, Ornaments = true,
                 CanvasWidth = 1800, CanvasHeight = 420, BasePixels = 185, BoxX = 185.1f, BoxY = 43.3f, BoxWidth = 1429.8f, BoxHeight = 333.3f,
                 Width = 0.8f, Height = 0.1867f, CameraDistance = 1.28f, LookY = 0f,
             },
             new PlateStyle
             {
-                Key = "alankh_rope", Title = "Al'Ankh rope plaque", PrefabIndex = 653, FaceSlot = 0, Ornaments = true,
+                Key = "alankh_rope", Region = 0, Title = "Al'Ankh Rope Plaque", PrefabIndex = 653, FaceSlot = 0, Ornaments = true,
                 CanvasWidth = 1600, CanvasHeight = 800, BasePixels = 150, BoxX = 179.5f, BoxY = 116.7f, BoxWidth = 1240.9f, BoxHeight = 566.7f,
                 EllipseX = 583.2f, EllipseY = 255f,
                 Width = 0.6343f, Height = 0.3343f, CameraDistance = 1.03f, LookY = 0f,
             },
             new PlateStyle
             {
-                Key = "aestrin", Title = "Aestrin Brass Anchor", PrefabIndex = 651, FaceSlot = 0, Ornaments = false,
+                Key = "aestrin", Region = 2, Title = "Aestrin Brass Anchor", PrefabIndex = 651, FaceSlot = 0, Ornaments = false,
                 CanvasWidth = 1928, CanvasHeight = 711, BasePixels = 200, BoxX = 77.9f, BoxY = 260.1f, BoxWidth = 1772.3f, BoxHeight = 360f,
                 LettersSlot = 4, LettersRect = new[] { 41, 224, 1846, 433 },
                 Width = 0.9273f, Height = 0.3391f, CameraDistance = 1.48f, LookY = 0f,
             },
             new PlateStyle
             {
-                Key = "aestrin_quarter", Title = "Aestrin quarter board", PrefabIndex = 654, FaceSlot = 0, Ornaments = true,
+                Key = "aestrin_quarter", Region = 2, Title = "Aestrin Quarter Board", PrefabIndex = 654, FaceSlot = 0, Ornaments = true,
                 CanvasWidth = 2200, CanvasHeight = 600, BasePixels = 150, BoxX = 384f, BoxY = 160f, BoxWidth = 1431.9f, BoxHeight = 280f,
                 Width = 1.085f, Height = 0.226f, CameraDistance = 1.64f, LookY = 0f,
             },
             new PlateStyle
             {
-                Key = "emerald", Title = "Emerald lacquered red", PrefabIndex = 652, FaceSlot = 0, Ornaments = true,
+                Key = "emerald", Region = 1, Title = "Emerald Lacquered Red", PrefabIndex = 652, FaceSlot = 0, Ornaments = true,
                 CanvasWidth = 1660, CanvasHeight = 388, BasePixels = 170, BoxX = 233.2f, BoxY = 39.9f, BoxWidth = 1193.6f, BoxHeight = 297.8f,
                 LettersSlot = 3, LettersRect = new[] { 203, 10, 1254, 358 },
                 Width = 0.86f, Height = 0.2752f, CameraDistance = 1.37f, LookY = 0f,
             },
             new PlateStyle
             {
-                Key = "emerald_torii", Title = "Emerald torii", PrefabIndex = 655, FaceSlot = 2, Ornaments = false,
+                Key = "emerald_torii", Region = 1, Title = "Emerald Torii", PrefabIndex = 655, FaceSlot = 2, Ornaments = false,
                 CanvasWidth = 1100, CanvasHeight = 440, BasePixels = 130, BoxX = 43.6f, BoxY = 87.2f, BoxWidth = 1012.8f, BoxHeight = 244.4f,
                 Width = 0.9045f, Height = 0.4277f, CameraDistance = 1.45f, LookY = 0.025f,
             },
@@ -1257,8 +1301,8 @@ namespace ShipwrightAndTransport
 
     // ==== BoardPlates ====
 
-    // The name plate page (§9.7, plate.json): the list becomes the six styles, each region's two together (all six rows on
-    // one page, BoardParts.Rows), and back returns to the ship. The page
+    // The name plate page (§9.7, plate.json): the list becomes the styles sold here (§9.10: this region's two, and with the
+    // unlock those of the regions visited, up to all six on one page, BoardParts.Rows), and back returns to the ship. The page
     // has the six font buttons, the plate's picture, the font size and the plate size with their arrows, "Preview size" and the
     // plate's real size to their right, three lines, the price and Buy. Built once when it opens; a click changes only what it
     // changes (0.1.6, B6: every click rebuilt the whole page, which flickered).
@@ -1298,11 +1342,11 @@ namespace ShipwrightAndTransport
 
         internal static bool Previewing => IsOpen && Instance.previewing;
 
-        // From a ship's page: Al'Ankh, Immortal, size 10, plate size 1.
+        // From a ship's page: this region's first plate, Immortal, size 10, plate size 1.
         private void ShowStyles(int index)
         {
             if (!PlateBundle.Loaded) { Notify.Show("Name plates are\nnot available."); return; }
-            plateStyle = 0;
+            plateStyle = Math.Max(0, Array.FindIndex(PlateData.Styles, s => s.Region == yard.region));
             plateFont = PlateData.Fonts[0].Asset;
             plateSize = PlateData.DefaultSize;
             plateScale = PlateData.DefaultScaleStep;
@@ -1316,15 +1360,15 @@ namespace ShipwrightAndTransport
             PlatePage(index);
         }
 
+        // The styles sold here (§9.10). One no longer sold (the toggle turned off meanwhile) gives way to the first that is.
         private void PlateList(int index)
         {
             items.Clear();
-            for (int i = 0; i < PlateData.Styles.Length; i++)
-            {
-                int style = i;
-                items.Add(new BoardItem { Text = PlateData.Styles[i].Title, Clicked = () => PickStyle(index, style) });
-            }
-            ShowList(BoardList.Styles, plateStyle, false, "back", () => ShowShips(index));
+            var sold = PlateRegions.SoldAt(yard);
+            if (!sold.Contains(plateStyle)) plateStyle = sold.Count > 0 ? sold[0] : 0;
+            foreach (int style in sold)
+                items.Add(new BoardItem { Text = PlateData.Styles[style].Title, Clicked = () => PickStyle(index, style) });
+            ShowList(BoardList.Styles, sold.IndexOf(plateStyle), false, "back", () => ShowShips(index));
         }
 
         // A style keeps the page: the list's highlight, the size that fits and the picture change.
@@ -1372,6 +1416,7 @@ namespace ShipwrightAndTransport
             shown.Price = page.Fee("Price:", "", Money.Names[yard.region]);
             page.MainButton("Buy", () =>
             {
+                if (!PlateRegions.SoldAt(yard).Contains(plateStyle)) { ShowPlate(index); return; }
                 if (Plates.Buy(yard, info, PlateData.Styles[plateStyle], plateFont, ShownPlateSize(index), PlateData.Scales[plateScale], index)) ShowShips(index);
             });
             UpdatePlatePage();

@@ -269,6 +269,56 @@ namespace ShipwrightAndTransport
             return Ships.BoatOf(record.saveIndex) ? null : "This ship can't be found.";
         }
 
+        // ---- Sale (SPEC.md §5.10) ----
+
+        // A stored copy's sale in a currency at today's rate: her two shares and the fee due; Net is what the player gets
+        // (negative: pays).
+        internal sealed class Sale
+        {
+            internal int Currency, Ship, Cargo, Due, Net;
+        }
+
+        internal static Sale SaleOf(StoredShip record, int currency)
+        {
+            var copy = CopyEngine.RecordOfIndex(record.saveIndex);
+            float rate = Money.Rate(currency);
+            var sale = new Sale
+            {
+                Currency = currency, Ship = Fees.SaleShip(copy != null ? Orders.Price(copy.hull) : 0, rate),
+                Cargo = Fees.SaleCargo(record.cargoUnits, rate), Due = FeeDue(record, currency),
+            };
+            sale.Net = Fees.SaleNet(sale.Ship, sale.Cargo, sale.Due);
+            return sale;
+        }
+
+        // Only a copy (the user, 2026-10-31: "only able to sell copy, cannot sell original ship"); the page shows Sell only for
+        // one, so the rest guards a page left open.
+        internal const string NotSellable = "Only ships the shipyards\nbuilt can be sold.";
+
+        internal static string RefusalToSell(ShipyardInfo info, StoredShip record)
+        {
+            if (record.shipyard != info.Name) return "Sell it at\n" + record.shipyard + ".";
+            if (Transport.RecordOf(record.saveIndex) != null) return "It is booked for transport.";
+            return CopyEngine.RecordOfIndex(record.saveIndex) == null ? NotSellable : null;
+        }
+
+        internal static bool Sell(ShipyardInfo info, StoredShip record, Sale sale)
+        {
+            string refusal = RefusalToSell(info, record);
+            if (refusal != null) { Notify.Show(refusal); return false; }
+            if (sale.Net < 0 && !Money.Pay(sale.Currency, -sale.Net)) return false;
+            int index = record.saveIndex;
+            string name = Ships.NameOf(index);
+            var copy = CopyEngine.RecordOfIndex(index);
+            State.Save.stored.Remove(record);
+            CopyEngine.Retire(copy);
+            State.Save.names.RemoveAll(n => n.saveIndex == index);
+            Money.Receive(sale.Currency, sale.Net);
+            Notify.Show("Sold " + name + ".");
+            Log.Info(name + " sold at " + info.Name + ": ship " + sale.Ship + ", cargo " + sale.Cargo + ", fee due " + sale.Due + ", net " + sale.Net + " " + Money.Short[sale.Currency] + ".");
+            return true;
+        }
+
         // Collect steps (§5.7): pay, bring her to the shipyard's edit position (a copy never taken out is built there),
         // clean up her rigging and admit her, so the shipyard menu opens.
         internal static IEnumerator TakeOut(Shipyard yard, ShipyardInfo info, StoredShip record)
@@ -1099,6 +1149,41 @@ namespace ShipwrightAndTransport
             page.Button("Transport", new Vector3(0.49f, -0.602f, 0.639f), small, () => ShowDestinations(index, null, false));
             page.Button("Name plate", new Vector3(0f, -0.602f, 0.639f), small, () => ShowStyles(index));
             page.Button("Take out", new Vector3(-0.49f, -0.602f, 0.639f), small, () => TakeOut(index));
+            // A copy can be sold (SPEC.md §5.10): above Take out (Claude's choice of place).
+            if (CopyEngine.RecordOfIndex(index) != null)
+                page.Button("Sell", new Vector3(-0.49f, -0.36f, 0.639f), small, () => SellPage(index, false));
+        }
+
+        // A stored copy's sale (SPEC.md §5.10): her shares and the fee due, then Sell, which asks to confirm in place as Send.
+        private void SellPage(int index, bool confirm)
+        {
+            var record = Storage.RecordOf(index);
+            if (record == null || Storage.RefusalToSell(info, record) != null) { ShowShips(index); return; }
+            var sale = Storage.SaleOf(record, yard.region);
+            BeginPage(() => SellPage(index, confirm));
+            page.Title("Sell " + Ships.NameOf(index), false);
+            string unit = " " + Money.Short[sale.Currency];
+            page.Block(BoardPage.Left, 0.70f, "Ship:", Money.Amount(sale.Ship) + unit, "80% of her value");
+            page.Block(BoardPage.Left, 0.44f, "Cargo:", Money.Amount(sale.Cargo) + unit, "80% of its value");
+            page.Block(BoardPage.Left, 0.18f, "Storage fee due:", Money.Amount(sale.Due) + unit);
+            string ask = sale.Net >= 0 ? "Sell for " + Money.Amount(sale.Net) + "?" : "Pay " + Money.Amount(-sale.Net) + " and sell?";
+            var warning = page.Line(0, confirm ? ask : "Cannot be undone.");
+            page.Fee(sale.Net >= 0 ? "You get:" : "You pay:", Money.Amount((int)Math.Min(int.MaxValue, Math.Abs((long)sale.Net))), Money.Names[sale.Currency]);
+            BoardButton main = null;
+            main = page.MainButton(confirm ? "Confirm" : "Sell", () =>
+            {
+                if (!confirm)
+                {
+                    confirm = true;
+                    if (warning) warning.text = ask;
+                    BoardPage.Relabel(main, "Confirm");
+                    return;
+                }
+                // Made again at the click: past a midnight the fee due and the rate have moved (as the transport page).
+                var fresh = Storage.SaleOf(record, yard.region);
+                if (fresh.Net != sale.Net) { Notify.Show("The price has changed."); SellPage(index, true); return; }
+                if (Storage.Sell(info, record, fresh)) ShowShips(index);
+            });
         }
 
         private void TakeOut(int index)

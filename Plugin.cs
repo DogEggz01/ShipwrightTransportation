@@ -28,12 +28,13 @@ namespace ShipwrightAndTransport
     [BepInIncompatibility(StorageGuid)]
     public sealed class Plugin : BaseUnityPlugin
     {
-        public const string Guid = "DogEggz.ShipwrightTransport", PluginName = "Shipwright and Transport", Version = "0.1.2";
+        public const string Guid = "DogEggz.ShipwrightTransport", PluginName = "Shipwright and Transport", Version = "0.1.3";
         internal const string StorageGuid = "DogEggz.ShipwrightandStorage";
 
         internal static Plugin Instance;
         internal static ConfigEntry<KeyboardShortcut> StatusKey;
         internal static ConfigEntry<bool> InstantShips;
+        internal static ConfigEntry<bool> UnlockVisitedPlates;
         private static Harmony harmony;
         private static bool latePatched;
 
@@ -46,6 +47,9 @@ namespace ShipwrightAndTransport
             InstantShips = Config.Bind("Building", "Instant ships", false,
                 "On: ordering a ship finishes her at once, with no materials and no building time, and she goes straight into storage at that " +
                 "shipyard. The building fee is still paid. An order already open finishes at the next clock check.");
+            UnlockVisitedPlates = Config.Bind("Plates", "Unlock visited regions", false,
+                "Off: each shipyard sells only its own region's two name plates. On: once you have visited one of a region's shipyards " +
+                "(used or looked at its documents), that region's two plates are sold at every shipyard too. Visits count whether this is on or off.");
             Log.Init(Logger, debugLog);
             PlateBundle.Load(Path.GetDirectoryName(Info.Location));
             Patch();
@@ -546,6 +550,19 @@ namespace ShipwrightAndTransport
             return Round(local / 0.006f);
         }
 
+        // A stored copy's sale (SPEC.md §5.10; the user, 2026-10-31: "sell the boat for 80% of it's value in local currency",
+        // her cargo "Sold with her at 80%", her storage fee "Taken from the sale"): 80% of her price (gold, 0.006 a unit, as
+        // BuildingFee) and of her cargo's value, each in local coins; what the player gets is that less the fee due, and a
+        // negative sum is what the player pays.
+        internal const float SaleShare = 0.8f;
+
+        internal static int SaleShip(int price, float rate) => Round(SaleShare * ((float)Math.Max(0, price) / 0.006f) * rate);
+
+        internal static int SaleCargo(int cargoUnits, float rate) => Round(SaleShare * (float)Math.Max(0, cargoUnits) * rate);
+
+        internal static int SaleNet(int ship, int cargo, int due) =>
+            (int)Math.Max(int.MinValue, Math.Min(int.MaxValue, (long)ship + cargo - due));
+
         // Units per metre of length per mile, in the ordering shipyard's currency (SPEC.md §6; the user, 2026-10-29:
         // "Normal = 0.6 x length", "Other shipyard = 0.8 x length"; the tow's two legs 1 × length, as first given).
         internal const float NormalPerMetre = 0.6f, OtherYardPerMetre = 0.8f, TowPerMetre = 1f;
@@ -652,6 +669,15 @@ namespace ShipwrightAndTransport
             if (UISoundPlayer.instance) UISoundPlayer.instance.PlayGoldSound();
             if (DayLogs.instance) DayLogs.instance.dayLogs[currency].LogTransaction(-amount, TransactionCategory.boat);
             return true;
+        }
+
+        // A sale's coins (SPEC.md §5.10): added with Pay's sound and day log.
+        internal static void Receive(int currency, int amount)
+        {
+            if (amount <= 0 || PlayerGold.currency == null) return;
+            PlayerGold.currency[currency] += amount;
+            if (UISoundPlayer.instance) UISoundPlayer.instance.PlayGoldSound();
+            if (DayLogs.instance) DayLogs.instance.dayLogs[currency].LogTransaction(amount, TransactionCategory.boat);
         }
 
         // Gives back what Pay took when the step it paid for fails.
@@ -1274,6 +1300,9 @@ namespace ShipwrightAndTransport
         public List<CopyRecord> copies = new List<CopyRecord>();
         public List<OrderRecord> orders = new List<OrderRecord>();
         public List<PlateRecord> plates = new List<PlateRecord>();
+        // The regions whose shipyards were visited, bit r for Shipyard.region r (0 Al'Ankh, 1 Emerald, 2 Aestrin), for the
+        // plates' unlock (§9.10). A save from before it has none.
+        public int visitedRegions;
     }
 
     [Serializable]
@@ -1427,6 +1456,7 @@ namespace ShipwrightAndTransport
                 if (copy.k >= save.nextCopy) save.nextCopy = copy.k + 1;
             if (save.nextCopy < 1) save.nextCopy = 1;
             if (save.parkingField != 0 && save.parkingField != 1) save.parkingField = 0;
+            save.visitedRegions &= PlateRegions.AllRegions;
             return save;
         }
 
@@ -1883,8 +1913,10 @@ namespace ShipwrightAndTransport
     [HarmonyPatch(typeof(ShipyardDocuments), "UpdateLookText")]
     internal static class DocumentsLookTextPatch
     {
+        // The game asks only while the documents are looked at: a shipyard visit for the plates (§9.10).
         private static void Postfix(ShipyardDocuments __instance)
         {
+            PlateRegions.Visit(__instance.shipyard);
             if (!Documents.Serves(__instance)) return;
             int count = __instance.shipyard.GetBoatsInTriggerCount();
             __instance.lookText = count < 1 ? "shipwright board"
@@ -1954,6 +1986,7 @@ namespace ShipwrightAndTransport
             this.documents = documents.transform;
             this.yard = yard;
             this.info = info;
+            PlateRegions.Visit(yard);
             confirmCancel = false;
             GameState.inPortMissionList = true;
             MouseLook.ToggleMouseLookAndCursor(false);
