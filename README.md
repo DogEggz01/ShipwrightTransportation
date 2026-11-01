@@ -13,6 +13,7 @@
 - Al'ankh ship built in GRC, Aestrin ship in built in FA, Kakam and Junk in DC, Jong in Kicia bay.
 - Aside from gold, you also need to give shipwright the material he need. The deliver area will be nearby shipyard.
 - After the ship is done building, you can retreive it from storage.
+- Extra built ship can be sold at 80% of the price. Original ship cannot be sold.
 
 ## Storage and transport
 <img width="3840" height="2160" alt="20A74B~1" src="https://github.com/user-attachments/assets/1045e8f7-8ee1-427f-b5de-3fb4cd20d7c3" />
@@ -48,3 +49,5 @@
 - You can choose font, font size, plate size of the nameplate
 - Each region receive 2 varient, it was sold at all shipyard.
 - After bought, it will show up on shipyard table. It's a item that can be attached on the wall like painting.
+- You can only buy regional style nameplate from local shipwright.
+- There is an option in configurator, when toggle on after you visit other regional shipyard, you unlock the nameplate to be bought at other place.
