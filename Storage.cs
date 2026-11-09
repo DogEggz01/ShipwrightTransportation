@@ -16,8 +16,14 @@ namespace ShipwrightAndTransport
     {
         internal static StoredShip RecordOf(int index) => State.Save.stored.Find(s => s.saveIndex == index);
 
-        // Stored somewhere or on the way: she is on the parking field (or not built yet), not where the player left her.
-        internal static bool IsAway(int index) => RecordOf(index) != null;
+        // Stored somewhere or on the way: she is on the parking field (or not built yet), or in a sailing transport's service
+        // (Sailing.cs), not where the player left her. The rescue and EconomyOverhaul's forced moves leave her alone. A tow not
+        // picked up yet leaves her an ordinary ship where she lies.
+        internal static bool IsAway(int index)
+        {
+            var transport = Transport.RecordOf(index);
+            return RecordOf(index) != null || transport != null && transport.mode == 1;
+        }
 
         internal static bool IsAway(Transform boatRoot)
         {
@@ -49,9 +55,10 @@ namespace ShipwrightAndTransport
 
         // The length used for transport (decisions 25, 27): the root capsule's height times the root's scale along it.
         // The Baghlah counts her full 27.8 m hull; her capsule is only 20.8 m.
+        internal const float BaghlahHull = 27.8f;
         internal static float LengthOf(PurchasableBoat boat, int hull)
         {
-            if (hull == 30) return 27.8f;
+            if (hull == 30) return BaghlahHull;
             var capsule = boat ? boat.GetComponent<CapsuleCollider>() : null;
             if (!capsule) return 10f;
             Vector3 scale = boat.transform.localScale;
@@ -174,7 +181,7 @@ namespace ShipwrightAndTransport
 
         // Another boat hanging on her, or she on another: a Dinghies cutter on its davits (hooked or stowed), or a tow.
         // Moving one alone would tear the joint.
-        private static string AttachedBoat(PurchasableBoat boat)
+        internal static string AttachedBoat(PurchasableBoat boat)
         {
             Transform root = boat.transform;
             foreach (var joint in boat.GetComponentsInChildren<Joint>(true))
@@ -249,6 +256,9 @@ namespace ShipwrightAndTransport
         // Shipyard.AdmitShip ran (StoreShipMenu.AdmitPatch): its slide started now.
         internal static void Admitted() => admittedAt = Time.time;
 
+        // The admit's slide is over (or its real-time limit since `startedReal` passed).
+        internal static bool SlideOver(float startedReal) => Time.time >= admittedAt + SlideSeconds || Time.realtimeSinceStartup >= startedReal + SlideRealLimit;
+
         // Daily wear and leaks apply to lastBoat only, and the rescue reaches for lastOwnedBoat (§5.5 step 5).
         internal static void ForgetBoat(Transform root)
         {
@@ -263,7 +273,11 @@ namespace ShipwrightAndTransport
             var transport = Transport.RecordOf(record.saveIndex);
             if (transport != null) return transport.tow ? "It is under tow." : "It is booked for transport.";
             if (GameState.currentShipyard) return "The shipyard is busy.";
+            // A ship in a sailing transport's service never counts in the area (SailingPatches.ShipyardAreaPrefix).
             if (Shipyards.BoatsInArea(yard).Count > 0) return "The shipyard must be empty.";
+            // Decisions 106, 203, 218: not while a ship in service waits at the shipyard, comes in to its release spot or lies there.
+            string release = Sailing.Voyages.ReleaseRefusal(info);
+            if (release != null) return release;
             var copy = CopyEngine.RecordOfIndex(record.saveIndex);
             if (copy != null && !copy.spawned) return CopyEngine.CanSpawn(copy) ? null : "This ship can't be\nbuilt right now.";
             return Ships.BoatOf(record.saveIndex) ? null : "This ship can't be found.";
@@ -295,11 +309,34 @@ namespace ShipwrightAndTransport
         // one, so the rest guards a page left open.
         internal const string NotSellable = "Only ships the shipyards\nbuilt can be sold.";
 
+        internal const string FinancedAboard = "Sell or open financed\ncargo first.";
+
         internal static string RefusalToSell(ShipyardInfo info, StoredShip record)
         {
             if (record.shipyard != info.Name) return "Sell it at\n" + record.shipyard + ".";
             if (Transport.RecordOf(record.saveIndex) != null) return "It is booked for transport.";
-            return CopyEngine.RecordOfIndex(record.saveIndex) == null ? NotSellable : null;
+            if (CopyEngine.RecordOfIndex(record.saveIndex) == null) return NotSellable;
+            return HoldsFinanced(record.saveIndex) ? FinancedAboard : null;
+        }
+
+        // Anything of hers on an EconomyOverhaul Respondentia loan (the user, 2026-11-06: "Refuse the sale"): Retire drops her
+        // cargo with no word to that mod, so the loan would stay open for good and the sale would pay for the crate. By item id,
+        // as that mod keeps its records: a stored ship's cargo is data in her cache, and any item still loose counts too, as in
+        // FilledCrates. A copy never built has neither.
+        internal static bool HoldsFinanced(int index)
+        {
+            if (index <= 0) return false;
+            var prefabs = SaveLoadManager.instance ? SaveLoadManager.instance.GetCurrentPrefabs() : null;
+            if (prefabs != null)
+                foreach (var prefab in prefabs)
+                    if (prefab && prefab.GetParentObject() == index && Compat.EconomyOverhaul.IsFinanced(prefab.instanceId)) return true;
+            var boat = Ships.BoatOf(index);
+            var items = boat ? boat.GetComponent<BoatLocalItems>() : null;
+            var cached = items ? items.GetCachedItems() : null;
+            if (cached != null)
+                foreach (var data in cached)
+                    if (data != null && Compat.EconomyOverhaul.IsFinanced(data.instanceId)) return true;
+            return false;
         }
 
         internal static bool Sell(ShipyardInfo info, StoredShip record, Sale sale)
@@ -316,6 +353,108 @@ namespace ShipwrightAndTransport
             Money.Receive(sale.Currency, sale.Net);
             Notify.Show("Sold " + name + ".");
             Log.Info(name + " sold at " + info.Name + ": ship " + sale.Ship + ", cargo " + sale.Cargo + ", fee due " + sale.Due + ", net " + sale.Net + " " + Money.Short[sale.Currency] + ".");
+            return true;
+        }
+
+        // ---- The trade fleet (SPEC.md §5.11) ----
+
+        // EconomyOverhaul's trade office: up to 3 of the player's ships per office trade as its traders (its TRADE_OFFICE_DRAFT.md §4.5;
+        // the user: "Add ship to the fleet in shipwright storage. The trader ship will look the same as how you rigged it."). A stored
+        // copy joins from her storage page, as Sell takes her (Q8 "A": only ships the yards built), with no sale money.
+
+        // The office region a yard's ships join, in EconomyOverhaul's numbering (0 Al'Ankh, 1 Emerald, 2 Aestrin: the yards' coins),
+        // or -1. The Chronos yard has none (Q15, "yes as you said": "the Chronos yard has none, so no option there"), though it
+        // takes Aestrin's coin.
+        internal static int FleetRegion(ShipyardInfo info) => info == null || info.OldChronian ? -1 : info.Currency;
+
+        internal static readonly string[] RegionNames = { "Al'Ankh", "Emerald", "Aestrin" };
+
+        // Her button shows only where she may join (Q15: "the option shows only when that region has a free place"): EconomyOverhaul
+        // with the trade fleet, a copy stored at this yard, and an office of its region with the trade fleet and room for her hull.
+        internal static bool FleetOffered(ShipyardInfo info, StoredShip record)
+        {
+            if (record == null || record.shipyard != info.Name || !Compat.EconomyOverhaul.FleetKnown) return false;
+            var copy = CopyEngine.RecordOfIndex(record.saveIndex);
+            int region = FleetRegion(info);
+            return copy != null && region >= 0 && Compat.EconomyOverhaul.FleetRefusal(region, copy.hull) == null;
+        }
+
+        internal const string NotFleetable = "Only ships the shipyards\nbuilt can trade.";
+        // The user's Q9 ("As you said"): refused while cargo is aboard. Any item of the ship's counts, as its cargo's value does
+        // (CargoValue): it would go with the ship, unpaid.
+        // A ship with sails or hull options from other mods joins too (the user, 2026-11-09: "ship should be allowed to add into trade
+        // fleet even if it use modded sail and hull option", in place of Q10's refusal of a sail not the game's own): EconomyOverhaul
+        // draws them, and takes the ship out of its fleet, 80% paid, if that mod is later missing.
+        internal const string ItemsAboard = "Take every item off\nthe ship first.";
+        internal const string RigUnread = "The ship's rig\ncan't be read.";
+        internal const string FleetFailed = "The ship couldn't join\nthe trade fleet.";
+
+        // Why the ship can't join the trade fleet from here now, or null: Sell's refusals (a page left open, a booking, not a copy,
+        // financed cargo), a pledge, anything aboard, then EconomyOverhaul's own (no office of the region with the trade fleet, or
+        // no room), its one line broken for the scroll.
+        internal static string RefusalToFleet(ShipyardInfo info, StoredShip record)
+        {
+            if (record.shipyard != info.Name) return "Add it at\n" + record.shipyard + ".";
+            if (Transport.RecordOf(record.saveIndex) != null) return "It is booked for transport.";
+            var copy = CopyEngine.RecordOfIndex(record.saveIndex);
+            if (copy == null) return NotFleetable;
+            if (Compat.EconomyOverhaul.IsPledged(record.saveIndex)) return "Repay the loan first.";
+            if (HoldsFinanced(record.saveIndex)) return FinancedAboard;
+            if (HoldsItems(record.saveIndex)) return ItemsAboard;
+            int region = FleetRegion(info);
+            if (region < 0 || !Compat.EconomyOverhaul.FleetKnown) return "Not available";
+            return Notify.Wrap(Compat.EconomyOverhaul.FleetRefusal(region, copy.hull));
+        }
+
+        // Anything of hers, loose or packed in her cache (as HoldsFinanced reads them). A copy never built has nothing.
+        internal static bool HoldsItems(int index)
+        {
+            if (index <= 0) return false;
+            var prefabs = SaveLoadManager.instance ? SaveLoadManager.instance.GetCurrentPrefabs() : null;
+            if (prefabs != null)
+                foreach (var prefab in prefabs)
+                    if (prefab && prefab.GetParentObject() == index) return true;
+            var boat = Ships.BoatOf(index);
+            var items = boat ? boat.GetComponent<BoatLocalItems>() : null;
+            var cached = items ? items.GetCachedItems() : null;
+            if (cached != null)
+                foreach (var data in cached)
+                    if (data != null) return true;
+            return false;
+        }
+
+        // She joins (SPEC.md §5.11): her rig read off her parked ship first (a copy never built has none, and EconomyOverhaul gives her
+        // hull's stock rig), the storage fee due paid (Q9: "the storage fee due is charged; no sale money is paid"), then
+        // EconomyOverhaul's Add, which tells the player she joined. On her trader id she leaves storage as a sold copy does
+        // (CopyEngine.Retire); on -1 she stays stored and the fee is given back.
+        internal static bool AddToFleet(ShipyardInfo info, StoredShip record, int currency, int due)
+        {
+            string refusal = RefusalToFleet(info, record);
+            if (refusal != null) { Notify.Show(refusal); return false; }
+            int index = record.saveIndex;
+            var copy = CopyEngine.RecordOfIndex(index);
+            string name = Ships.NameOf(index);
+            var boat = Ships.BoatOf(index);
+            string rig = null;
+            if (boat)
+            {
+                rig = Compat.EconomyOverhaul.FleetRig(boat.gameObject);
+                if (string.IsNullOrEmpty(rig)) { Notify.Show(RigUnread); Log.Warn(name + "'s rig couldn't be read for the trade fleet; she stays stored."); return false; }
+            }
+            if (due > 0 && !Money.Pay(currency, due)) return false;
+            int id = Compat.EconomyOverhaul.FleetAdd(FleetRegion(info), copy.hull, name, rig);
+            if (id < 0)
+            {
+                Money.Refund(currency, due);
+                Notify.Show(FleetFailed);
+                Log.Warn(name + " was not added to the trade fleet (EconomyOverhaul's Add gave -1); she stays stored, the fee given back.");
+                return false;
+            }
+            State.Save.stored.Remove(record);
+            CopyEngine.Retire(copy, "joined the trade fleet");
+            State.Save.names.RemoveAll(n => n.saveIndex == index);
+            Log.Info(name + " joined the trade fleet from " + info.Name + " as EconomyOverhaul's trader " + id + ": hull " + copy.hull + ", fee due " + due + " " +
+                Money.Short[currency] + ", rig " + (rig == null ? "none (never built: her hull's stock rig)" : "\"" + rig.TrimEnd('\n').Replace("\n", " | ") + "\"") + ".");
             return true;
         }
 
@@ -349,27 +488,35 @@ namespace ShipwrightAndTransport
             Rerig(boat);
             Log.Info("Took out " + Ships.NameOf(record.saveIndex) + " at " + info.Name + ".");
             yield return new WaitForFixedUpdate();
-            // Through the documents click, as a player admits her (GameAccess.ActivateDocuments); AdmitShip alone only if that
-            // didn't admit her at all (not half-way).
-            bool admitted = GameState.currentShipyard != null || GameAccess.ActivateDocuments(yard, boat.gameObject);
-            if (!admitted && GameState.currentShipyard == null)
+            if (!Admit(yard, boat, Ships.NameOf(record.saveIndex)))
             {
-                Log.Warn("The documents click didn't admit " + Ships.NameOf(record.saveIndex) + "; admitting her directly.");
-                admitted = GameAccess.AdmitShip(yard, boat.gameObject);
-            }
-            if (!admitted)
-            {
-                // An admit that stopped halfway leaves the menu open without an order, and every button and Exit then
-                // throws (0.1.0's Instant Cog, AllSailsAllShipyards' menu postfix): backed out, she is released at the shipyard.
-                Admitted();
-                GameAccess.CloseHalfAdmit(yard);
                 Notify.Show(AdmitFailed);
                 Plugin.Instance.StartCoroutine(ReleaseAfterSlide(yard, boat));
             }
             Plugin.Instance.StartCoroutine(UnpackAfterSlide(boat));
         }
 
-        internal const string AdmitFailed = "The shipyard couldn't\ntake her in. She is\nreleased here.";
+        internal const string AdmitFailed = "The shipyard couldn't\ntake the ship in. It is\nreleased here.";
+
+        // Admits a ship brought to the edit spot (§5.7 step 2): through the documents click, as a player admits her
+        // (GameAccess.ActivateDocuments); AdmitShip alone only if that didn't admit her at all (not half-way). True when admitted,
+        // or when a shipyard was already open. An admit that stopped halfway leaves the menu open without an order, and every button
+        // and Exit then throws (0.1.0's Instant Cog, AllSailsAllShipyards' menu postfix): it is backed out of, false, and the caller
+        // releases her (the take-out once the slide is over, ReleaseAfterSlide; the sailing transport's departure, Sailing.Voyages.Board,
+        // at the release spot once it is over).
+        internal static bool Admit(Shipyard yard, PurchasableBoat boat, string name)
+        {
+            bool admitted = GameState.currentShipyard != null || GameAccess.ActivateDocuments(yard, boat.gameObject);
+            if (!admitted && GameState.currentShipyard == null)
+            {
+                Log.Warn("The documents click didn't admit " + name + "; admitting her directly.");
+                admitted = GameAccess.AdmitShip(yard, boat.gameObject);
+            }
+            if (admitted) return true;
+            Admitted();
+            GameAccess.CloseHalfAdmit(yard);
+            return false;
+        }
 
         // The admit's slide still runs and leaves her kinematic at the edit spot: once it is over she goes to the release
         // spot, unless a shipyard took her in since.
@@ -804,6 +951,9 @@ namespace ShipwrightAndTransport
             bool moving = true;
             try
             {
+                // Its packed items' rotations belong to its rotation when they were packed (CacheFrames).
+                var cache = boat.GetComponent<BoatLocalItems>();
+                CacheFrames.KeepIfPacked(CacheFrames.IndexOf(cache), cache, boat.transform.rotation);
                 var mooring = boat.GetComponent<BoatMooringRopes>();
                 var controller = mooring ? mooring.GetAnchorController() : null;
                 if (mooring)
@@ -844,8 +994,16 @@ namespace ShipwrightAndTransport
                 if (anchor && controller)
                     Log.Info(Ships.NameOf(Ships.IndexOf(boat)) + ": her anchor is " + Vector3.Distance(anchor.position, controller.transform.position).ToString("F1") +
                         " m from its line's fitting after the move (kinematic " + (anchorBody && anchorBody.isKinematic) + ").");
-                // Brought near the player: check her distance at once, so she switches on and her cargo comes back.
-                if (near) GameAccess.RefreshHorizon(boat);
+                // Brought near the player: check her distance at once, so she switches on and her cargo comes back; and give back
+                // what a world shift took while she was hidden in her slot, which no shift will while the player stands at the
+                // yard (GameAccess.ClearStaleShift: players saw ships taken out "bouncing up and down in water"). A shift under
+                // way is let finish first, at most 10 s.
+                if (near)
+                {
+                    GameAccess.RefreshHorizon(boat);
+                    for (float end = Time.realtimeSinceStartup + 10f; GameAccess.WorldShifting() && Time.realtimeSinceStartup < end;) yield return null;
+                    if (GameAccess.ClearStaleShift(boat)) Log.Info(Ships.NameOf(Ships.IndexOf(boat)) + ": a world shift from while she was hidden was given back (RestoreMomentum).");
+                }
             }
             finally { moving = false; Running--; }
         }
@@ -939,6 +1097,97 @@ namespace ShipwrightAndTransport
         }
     }
 
+    // ==== CacheFrames ====
+
+    // A packed item keeps its place relative to its ship but its rotation in the world (SaveablePrefab.PrepareSaveData and
+    // Load). The game packs only a ship it has hidden and unpacks it where it lies, so for the game the two agree. But Shipwright
+    // packs a stored ship at the release spot (Store, right after DischargeShip) and the game unpacks it at the edit spot after
+    // the take-out's slide (UnpackAfterSlide), and a towed ship the game packed at sea is moved to the parking field
+    // (Teleporter.Move): each item came back turned about its own pivot by as much as the ship had turned, and a nailed one
+    // stays so (players, through the user, 2026-11-09: "everytime after took out the ship, the nailed item on ship will move
+    // slighty"). So the ship's rotation when its items were packed is kept by save index (the save's cacheFrames), and when the
+    // game unpacks the cache each item is turned by what the ship has turned since (CacheTurnPatch). A ship the game packs and
+    // unpacks without Shipwright packing or moving it keeps vanilla's way.
+    internal static class CacheFrames
+    {
+        internal static int IndexOf(BoatLocalItems items)
+        {
+            var saveable = items ? items.GetComponent<SaveableObject>() : null;
+            return saveable ? saveable.sceneIndex : 0;
+        }
+
+        internal static CacheFrame Of(int index) => index > 0 ? State.Save.cacheFrames.Find(f => f.saveIndex == index) : null;
+
+        // Shipwright packed the ship's items now (GameAccess.PackCargo).
+        internal static void Packed(int index, Quaternion rotation) => Set(index, true, rotation);
+
+        // Before Shipwright moves a ship, or stores one the game had packed: a frame left from a cache since unpacked goes; a
+        // ship the game packed (a tow's, hidden at sea) has kept still since, so its rotation now is its rotation then.
+        // shortcut: the game packs a ship 1-3 km off and hides it only at 3 km, so one swinging at anchor in between turns a
+        // little after it is packed (vanilla's own unpack has the same gap); a postfix on the game's packing would close it.
+        internal static void KeepIfPacked(int index, BoatLocalItems items, Quaternion rotation)
+        {
+            if (index <= 0) return;
+            bool holds = GameAccess.CacheHoldsItems(items);
+            var frame = Of(index);
+            if (frame != null && !holds) State.Save.cacheFrames.Remove(frame);
+            else if (frame == null && holds) Set(index, true, rotation);
+        }
+
+        internal static void Forget(int index) => State.Save.cacheFrames.RemoveAll(f => f.saveIndex == index);
+
+        // A save from before the frames: its stored ships and those carried on paper were packed at a rotation it didn't keep,
+        // so they bring their items back as 0.1.3 did; frames start with their next packing. A tow before its pickup isn't
+        // marked: the game packed that ship where it lies (KeepIfPacked). Returns how many were marked.
+        internal static int FromOlderSave()
+        {
+            int marked = 0;
+            foreach (var record in State.Save.stored) { Set(record.saveIndex, false, Quaternion.identity); marked++; }
+            foreach (var transport in State.Save.transports)
+                if (!transport.tow && Of(transport.saveIndex) == null) { Set(transport.saveIndex, false, Quaternion.identity); marked++; }
+            return marked;
+        }
+
+        // An item packed with the ship at `frame`, the ship now at `now`: the item keeps its rotation relative to the ship.
+        // For unit quaternions the conjugate is the inverse (Quaternion.Inverse is native code, which the host tests can't run).
+        internal static Quaternion Turned(Quaternion frame, Quaternion now, Quaternion item) => now * Conjugate(frame) * item;
+
+        internal static Quaternion Conjugate(Quaternion q) => new Quaternion(-q.x, -q.y, -q.z, q.w);
+
+        private static void Set(int index, bool known, Quaternion rotation)
+        {
+            if (index <= 0) return;
+            Forget(index);
+            State.Save.cacheFrames.Add(new CacheFrame { saveIndex = index, known = known, x = rotation.x, y = rotation.y, z = rotation.z, w = rotation.w });
+        }
+    }
+
+    // As the game unpacks a ship's cache: each item turned by what the ship has turned since it was packed, before the game
+    // loads it (KeeviFixes' Load postfix, which re-hangs hung items, then reads the turned rotation). The frame goes either way.
+    [HarmonyPatch(typeof(BoatLocalItems), "SpawnCachedItems")]
+    internal static class CacheTurnPatch
+    {
+        private static void Prefix(BoatLocalItems __instance)
+        {
+            try
+            {
+                int index = CacheFrames.IndexOf(__instance);
+                var frame = CacheFrames.Of(index);
+                if (frame == null) return;
+                CacheFrames.Forget(index);
+                var cached = __instance.GetCachedItems();
+                if (!frame.known || cached == null || cached.Count == 0) return;
+                var was = new Quaternion(frame.x, frame.y, frame.z, frame.w);
+                var now = __instance.transform.rotation;
+                foreach (var data in cached)
+                    if (data != null) data.rotation = CacheFrames.Turned(was, now, data.rotation);
+                Log.Info(Ships.NameOf(index) + ": its " + cached.Count + " packed item(s) turned " + Quaternion.Angle(was, now).ToString("F2") +
+                    " degrees with the ship since they were packed.");
+            }
+            catch (Exception e) { Log.Warn("Packed items' turn failed (" + e.Message + "); they come back as in vanilla."); }
+        }
+    }
+
     // ==== CrateTakeOut ====
 
     // A crate's items when a copy's cargo comes back (SPEC.md §5.7). An item in a crate lies at the crate's own place
@@ -958,8 +1207,19 @@ namespace ShipwrightAndTransport
     [HarmonyPatch(typeof(BoatLocalItems), "SpawnCachedItems")]
     internal static class CrateTakeOut
     {
-        // Shipwright's business: a copy's cache.
-        internal static bool Applies(int index) => CopyEngine.IsCopyIndex(index);
+        // Ships whose cache the game is to unpack while a sailing transport has them (Sailing.cs: her release from storage, her
+        // return from far travel by the clock); her unpacking clears the mark. Take out marks none: a ship stored holds no crate
+        // with items (Storage.FilledCrates), but one in service may have crates loaded aboard while she waits at her berth.
+        private static readonly HashSet<int> takingOut = new HashSet<int>();
+
+        internal static void TakingOut(int index)
+        {
+            if (index > 0) takingOut.Add(index);
+        }
+
+        // Shipwright's business: a copy's cache, or one a sailing transport marked.
+        internal static bool Applies(int index) => Applies(index, takingOut);
+        internal static bool Applies(int index, ICollection<int> marked) => index > 0 && (marked.Contains(index) || CopyEngine.IsCopyIndex(index));
 
         internal enum CrateStep { Insert, Hold, Release }
 
@@ -979,6 +1239,7 @@ namespace ShipwrightAndTransport
                 var saveable = __instance.GetComponent<SaveableObject>();
                 int index = saveable ? saveable.sceneIndex : 0;
                 if (!Applies(index)) return;
+                takingOut.Remove(index);
                 var cached = __instance.GetCachedItems();
                 if (cached == null) return;
                 foreach (var data in cached)
@@ -1152,18 +1413,71 @@ namespace ShipwrightAndTransport
             // A copy can be sold (SPEC.md §5.10): above Take out (Claude's choice of place).
             if (CopyEngine.RecordOfIndex(index) != null)
                 page.Button("Sell", new Vector3(-0.49f, -0.36f, 0.639f), small, () => SellPage(index, false));
+            // EconomyOverhaul's trade fleet (SPEC.md §5.11): left of Sell, over Transport and Name plate (Claude's choice of place).
+            if (Storage.FleetOffered(info, record)) FleetButton(index);
+        }
+
+        // The small buttons are 0.7 of the vanilla Accept button; this one is FleetWidth times as wide for its 18 letters, its label
+        // squeezed back in x so the letters keep their shape, and 0.9 of their size for room at the ends.
+        private const float FleetWidth = 1.55f, FleetLabel = 0.9f;
+        internal const string FleetButtonText = "Add to trade fleet";
+
+        private void FleetButton(int index)
+        {
+            var button = page.Button(FleetButtonText, new Vector3(0.245f, -0.36f, 0.639f), new Vector3(0.7f * FleetWidth, 0.7f, 1f), () => FleetPage(index, false));
+            var label = button ? button.transform.parent.Find("text") : null;
+            if (label) label.localScale = new Vector3(label.localScale.x * FleetLabel / FleetWidth, label.localScale.y * FleetLabel, label.localScale.z);
+        }
+
+        // A stored copy joining the trade fleet (SPEC.md §5.11): where she goes and the storage fee due, then Add, which asks to confirm
+        // in place as Sell does. Nothing is paid to the player (Q9).
+        private void FleetPage(int index, bool confirm)
+        {
+            var record = Storage.RecordOf(index);
+            if (record == null) { ShowShips(index); return; }
+            string refusal = Storage.RefusalToFleet(info, record);
+            if (refusal != null) { Notify.Show(refusal); ShowShips(index); return; }
+            int currency = yard.region, due = Storage.FeeDue(record, currency);
+            BeginPage(() => FleetPage(index, confirm));
+            page.Title("Add " + Ships.NameOf(index), false);
+            page.Block(BoardPage.Left, 0.70f, "Joins:", Storage.RegionNames[Storage.FleetRegion(info)] + " trade office");
+            string ask = due > 0 ? "Pay " + Money.Amount(due) + " and add?" : "Add the ship now?";
+            var warning = page.Line(0, confirm ? ask : "Cannot be undone.");
+            // The user (2026-11-08): "Change she leaves storage to the ship will leave storage."; two lines, as a line holds about
+            // 20 letters before the main button.
+            page.Line(1, "The ship will");
+            page.Line(2, "leave storage.");
+            // The user (2026-11-08): "Use storage fee due to replace "you pay" section at the top of the add button."
+            page.Fee("Storage fee due:", Money.Amount(due), Money.Names[currency]);
+            BoardButton main = null;
+            main = page.MainButton(confirm ? "Confirm" : "Add", () =>
+            {
+                if (!confirm)
+                {
+                    confirm = true;
+                    if (warning) warning.text = ask;
+                    BoardPage.Relabel(main, "Confirm");
+                    return;
+                }
+                // Made again at the click: past a midnight the fee due and the rate have moved (as Sell's page).
+                int fresh = Storage.FeeDue(record, currency);
+                if (fresh != due) { Notify.Show("The price has changed."); FleetPage(index, true); return; }
+                if (Storage.AddToFleet(info, record, currency, fresh)) ShowShips(index);
+            });
         }
 
         // A stored copy's sale (SPEC.md §5.10): her shares and the fee due, then Sell, which asks to confirm in place as Send.
         private void SellPage(int index, bool confirm)
         {
             var record = Storage.RecordOf(index);
-            if (record == null || Storage.RefusalToSell(info, record) != null) { ShowShips(index); return; }
+            if (record == null) { ShowShips(index); return; }
+            string refusal = Storage.RefusalToSell(info, record);
+            if (refusal != null) { Notify.Show(refusal); ShowShips(index); return; }
             var sale = Storage.SaleOf(record, yard.region);
             BeginPage(() => SellPage(index, confirm));
             page.Title("Sell " + Ships.NameOf(index), false);
             string unit = " " + Money.Short[sale.Currency];
-            page.Block(BoardPage.Left, 0.70f, "Ship:", Money.Amount(sale.Ship) + unit, "80% of her value");
+            page.Block(BoardPage.Left, 0.70f, "Ship:", Money.Amount(sale.Ship) + unit, "80% of its value");
             page.Block(BoardPage.Left, 0.44f, "Cargo:", Money.Amount(sale.Cargo) + unit, "80% of its value");
             page.Block(BoardPage.Left, 0.18f, "Storage fee due:", Money.Amount(sale.Due) + unit);
             string ask = sale.Net >= 0 ? "Sell for " + Money.Amount(sale.Net) + "?" : "Pay " + Money.Amount(-sale.Net) + " and sell?";

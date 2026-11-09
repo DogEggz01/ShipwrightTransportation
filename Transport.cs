@@ -10,16 +10,57 @@ namespace ShipwrightAndTransport
 {
     // ==== Transport ====
 
-    // Transport on paper (§6): no ship moves. The ship leaves a day after booking and arrives after miles ÷ knots; then
-    // her storage record changes shipyard, and she stays in her parking slot.
+    // Transport between shipyards. On paper (§6): no ship moves; she leaves a day after booking and arrives after miles ÷
+    // knots; then her storage record changes shipyard, and she stays in her parking slot. Sailing (Sailing.cs,
+    // SAILING_TRANSPORT_DRAFT.md): she waits moored at the origin berth for that day and really sails (Sailing.Voyages); a ship
+    // that can't sail (D1), or one booked at another yard than hers, goes on paper.
     internal static class Transport
     {
         internal const double FindingSailorsHours = 24.0;
 
         internal static TransportRecord RecordOf(int index) => State.Save.transports.Find(t => t.saveIndex == index);
 
-        // A tow has left with her once the tug has picked her up.
-        internal static bool HasLeft(TransportRecord record) => record.tow ? Tow.PickedUp(record) : GameClock.Hours >= record.departHour;
+        // She is no longer waiting at the origin: a tow once the tug has picked her up; sailing, once she has set out; on paper,
+        // from her departure hour.
+        internal static bool HasLeft(TransportRecord record) =>
+            record.tow ? Tow.PickedUp(record) : record.mode == 1 ? record.phase >= 1 : GameClock.Hours >= record.departHour;
+
+        // The hour she is expected in: on paper, the quoted hour; sailing, the quoted hour too, since the clock brings her in
+        // then wherever her sailing left her (decision 101), unless that hour has passed: then what her route still holds at
+        // the paper speed; once she is there, her storage hour.
+        internal static double ExpectedArrival(TransportRecord record) => ExpectedArrival(record, GameClock.Hours);
+
+        internal static double ExpectedArrival(TransportRecord record, double now) => ExpectedArrival(record, now, Sailing.Voyages.Of(record.saveIndex)?.Job);
+
+        // `live`: her voyage's own progress while it runs. Her record's job is only the copy of her last save or arrival
+        // (Voyage.CaptureForSave): a late ship's day was counted from that (review N5).
+        internal static double ExpectedArrival(TransportRecord record, double now, Sailing.VoyageJob live)
+        {
+            if (record.mode != 1 || record.job == null) return record.arriveHour;
+            if (record.phase == 2) return record.storeHour;
+            if (OnPaper(record)) return PaperArrival(record);
+            double clockHour = live?.clockHour ?? record.job.clockHour, done = live?.done ?? record.job.done;
+            double length = live?.length ?? record.job.length, speed = live?.speed ?? record.job.speed;
+            double from = Math.Max(now, clockHour);
+            if (record.phase == 0 || speed <= 0 || from < record.arriveHour) return record.arriveHour;
+            return from + Math.Max(0, length - done) / speed;
+        }
+
+        // Decision 98: a sailing voyage that hasn't gone on (sailed, held or lain moored) for a day, counted from her departure
+        // hour or from when she last did, is held up. Decision 206 (the user, 2026-10-13: "make it become on paper, if player approach
+        // it later it come back as sailing"): held up, she goes on paper (Voyages.NoteGoingOn), so a voyage on paper isn't held up.
+        // Decision 233: sailing or holding in physics, she has gone on only while she got somewhere (Sailing.Headway).
+        internal const double HeldUpAfterHours = 24;
+
+        internal static bool HeldUp(TransportRecord record, double now) =>
+            record != null && record.mode == 1 && !OnPaper(record) && now >= Math.Max(record.departHour, record.goingOnHour) + HeldUpAfterHours;
+
+        // Decision 206: on paper since her voyage was held up, not yet arrived; she arrives at her quoted hour, or at once when it had
+        // passed by then (as the clock brings a late ship in, decision 101), unless her sailor takes her again first.
+        internal static bool OnPaper(TransportRecord record) => record != null && record.mode == 1 && record.paperHour >= 0 && record.phase < 2;
+        internal static double PaperArrival(TransportRecord record) => Math.Max(record.arriveHour, record.paperHour);
+
+        internal static bool HeldUp(TransportRecord record) => HeldUp(record, GameClock.Hours);
 
         internal sealed class Quote
         {
@@ -31,6 +72,9 @@ namespace ShipwrightAndTransport
             internal bool FromOtherYard => From != OrderedAt;
             internal bool OneCurrency => Currency == StorageCurrency;
             internal int Total => (int)Math.Min(int.MaxValue, (long)TransportFee + StorageFee);
+            // Null when she sails herself; otherwise why she goes on paper (D1, or booked at another yard).
+            internal string Carried;
+            internal bool Sails => Carried == null;
         }
 
         // The fee is the transport (with 20% of her cargo's value) plus the storage yard's fee through the departure day: the 24
@@ -50,20 +94,47 @@ namespace ShipwrightAndTransport
             float perMetre = quote.FromOtherYard ? Fees.OtherYardPerMetre : Fees.NormalPerMetre;
             quote.TransportFee = Fees.TransportFee(record.lengthM, quote.Miles, record.cargoUnits, Money.Rate(currency), perMetre);
             quote.StorageFee = Fees.StorageDue(Fees.StorageDays(GameClock.Day + 1, record.dayStored), Storage.DailyFee(record, quote.StorageCurrency));
+            // Sailing or on paper, the fee and the times are the same. Booked at another yard she lies out of the player's sight: on
+            // paper (the user, 2026-11-03: "shouldn't any thing not in player's render distance be on paper?").
+            quote.Carried = quote.FromOtherYard ? OtherYard : Sailing.Voyages.WhyCarried(record) ?? Sailing.Voyages.WhyNoServiceBerth(from.Name);
             return quote;
         }
 
-        internal static bool Book(StoredShip record, Quote quote)
+        internal const string OtherYard = "Booked at another shipyard.";
+
+        internal const string CarriedInstead = "No clear way out: the\nship is carried instead.";
+
+        // A sailing booking is refused while the origin berth is taken (D2); one without a clear way out of the harbour is
+        // carried instead. `yard` is the board's shipyard, the origin when she sails.
+        internal static bool Book(StoredShip record, Quote quote, Shipyard yard)
         {
             if (RecordOf(record.saveIndex) != null) return false;
+            Sailing.VoyageJob job = null;
+            string why = null;
+            if (quote.Sails)
+            {
+                // Decision 106 (203, 218): the booking releases her onto the shipyard's release spot, so not while a ship in service waits
+                // at the shipyard or lies there.
+                string refusal = Sailing.Voyages.ReleaseRefusal(quote.From) ?? Sailing.Voyages.BerthRefusal(record, quote.From);
+                if (refusal != null) { Notify.Show(refusal); return false; }
+                job = Sailing.Voyages.PlanJob(record, quote, yard, out why);
+            }
             if (!PayBoth(quote)) return false;
-            State.Save.transports.Add(new TransportRecord
+            if (quote.Sails && job == null)
+            {
+                Log.Info("Sailing: " + Ships.NameOf(record.saveIndex) + " is carried instead: " + why);
+                Notify.Show(CarriedInstead);
+            }
+            var transport = new TransportRecord
             {
                 saveIndex = record.saveIndex, from = quote.From.Name, to = quote.To.Name, orderedAt = quote.OrderedAt.Name,
                 bookedHour = quote.Book, departHour = quote.Depart, arriveHour = quote.Arrive,
-            });
+                mode = job != null ? 1 : 0, lengthM = record.lengthM, feeUnits = record.feeUnits, job = job?.ToRecord(),
+            };
+            State.Save.transports.Add(transport);
+            if (job != null) Plugin.Instance.StartCoroutine(Sailing.Voyages.Board(transport, record, yard));
             Log.Info("Booked " + Ships.NameOf(record.saveIndex) + " from " + quote.From.Name + " to " + quote.To.Name +
-                (quote.FromOtherYard ? " at " + quote.OrderedAt.Name : "") +
+                (quote.FromOtherYard ? " at " + quote.OrderedAt.Name : "") + (job != null ? ", sailing" : ", on paper") +
                 ": leaves on day " + GameClock.DayOf(quote.Depart) + ", arrives on day " + GameClock.DayOf(quote.Arrive) + ".");
             return true;
         }
@@ -83,7 +154,8 @@ namespace ShipwrightAndTransport
 
         private static float nextCheck;
 
-        // Every few seconds and after loading, wherever the player is; several may arrive at once. A tow before its pickup is
+        // Paperwork arrivals and tows: every few seconds and after loading, wherever the player is; several may arrive at once.
+        // Sailing bookings arrive by their voyages (Sailing.Voyages). A tow before its pickup is
         // checked only in the regular checks: right after a load the game hasn't placed the player and the ships for good.
         internal static void Tick(bool now = false)
         {
@@ -102,10 +174,15 @@ namespace ShipwrightAndTransport
                     }
                     Tow.TellCrates(transport, hours, false);
                 }
-                if (hours < transport.arriveHour) continue;
+                if (transport.mode == 1 || hours < transport.arriveHour) continue;
                 State.Save.transports.Remove(transport);
                 var record = Storage.RecordOf(transport.saveIndex);
-                if (record == null) continue;
+                if (record == null)
+                {
+                    // A sailing booking that fell back to paper (its voyage unreadable) for a ship not stored (review M10).
+                    if (!transport.tow) Log.Info(Ships.NameOf(transport.saveIndex) + "'s booking to " + transport.to + " ended; she wasn't stored, so she stays where she is.");
+                    continue;
+                }
                 record.shipyard = transport.to;
                 record.dayStored = GameClock.DayOf(transport.arriveHour);
                 string name = Ships.NameOf(transport.saveIndex);
@@ -602,10 +679,13 @@ namespace ShipwrightAndTransport
         {
             page.Block(BoardPage.Left, 0.64f, "Origin port:", transport.from);
             page.Block(BoardPage.Left, 0.41f, "Destination:", transport.to);
+            // A sailing voyage that hasn't gone on for a day reads "held up" (decision 98).
+            bool heldUp = Transport.HeldUp(transport);
             if (arriving)
-                page.Block(BoardPage.Left, 0.18f, "Arrives:", "day " + GameClock.DayOf(transport.arriveHour), Fees.AtSea(transport.arriveHour - transport.departHour));
+                page.Block(BoardPage.Left, 0.18f, "Arrives:", heldUp ? Whereabouts.HeldUp : "day " + GameClock.DayOf(Transport.ExpectedArrival(transport)),
+                    Fees.AtSea(transport.arriveHour - transport.departHour));
             else
-                page.Block(BoardPage.Left, 0.18f, "Leaves:", "day " + GameClock.DayOf(transport.departHour));
+                page.Block(BoardPage.Left, 0.18f, "Leaves:", heldUp ? Whereabouts.HeldUp : "day " + GameClock.DayOf(transport.departHour));
         }
 
         // The list becomes the destinations, nearest first; back returns to the ships. A destination's page reads like a
@@ -644,7 +724,8 @@ namespace ShipwrightAndTransport
             page.Block(BoardPage.Left, 0.30f, "Leaves:", "day " + GameClock.DayOf(quote.Depart), "a day to find sailors");
             page.Block(BoardPage.Left, 0.04f, "Arrives:", "day " + GameClock.DayOf(quote.Arrive), Fees.AtSea(quote.Arrive - quote.Depart));
             page.Line(0, "Distance: " + quote.Miles + " miles");
-            page.Line(1, "Speed: " + quote.Knots.ToString("0.0", CultureInfo.InvariantCulture) + " knots");
+            // She sails herself from the shipyard's cleats (Sailing.cs, decision 217), or goes on paper, carried (§6, D1).
+            page.Line(1, (quote.Sails ? "Sails at " : "Carried at ") + quote.Knots.ToString("0.0", CultureInfo.InvariantCulture) + " knots");
             // Two currencies (stored at another yard): the transport here, her storage there, each named.
             string storage = Money.Amount(quote.StorageFee) + (quote.OneCurrency ? "" : " " + Money.Short[quote.StorageCurrency]);
             string ask = quote.OneCurrency ? "Pay " + Money.Amount(quote.Total) + " and send?" : "Pay " + Money.Amount(quote.TransportFee) + " + " + storage + "?";
@@ -674,7 +755,7 @@ namespace ShipwrightAndTransport
                     TransportPage(index, record, destination, true);
                     return;
                 }
-                if (Transport.Book(record, fresh)) ShowShips(index);
+                if (Transport.Book(record, fresh, yard)) ShowShips(index);
             });
         }
 
@@ -754,11 +835,11 @@ namespace ShipwrightAndTransport
             if (Tow.PickedUp(tow))
                 page.Block(BoardPage.Left, 0.18f, "Arrives:", "day " + GameClock.DayOf(tow.arriveHour), "under tow");
             else if (hours < tow.departHour)
-                page.Block(BoardPage.Left, 0.18f, "Tug leaves:", "day " + GameClock.DayOf(tow.departHour), "reaches her day " + GameClock.DayOf(tow.reachHour));
+                page.Block(BoardPage.Left, 0.18f, "Tug leaves:", "day " + GameClock.DayOf(tow.departHour), "reaches the ship day " + GameClock.DayOf(tow.reachHour));
             else if (hours < tow.reachHour)
-                page.Block(BoardPage.Left, 0.18f, "Reaches her:", "day " + GameClock.DayOf(tow.reachHour), "on its way to her");
+                page.Block(BoardPage.Left, 0.18f, "Reaches the ship:", "day " + GameClock.DayOf(tow.reachHour), "on its way to the ship");
             else
-                page.Block(BoardPage.Left, 0.18f, "Tug waiting:", "at your ship", hours < due ? "takes her day " + GameClock.DayOf(due) : "until nobody is near");
+                page.Block(BoardPage.Left, 0.18f, "Tug waiting:", "at your ship", hours < due ? "takes the ship day " + GameClock.DayOf(due) : "until nobody is near");
             double tug = Tow.TugProgress(hours, tow.departHour, tow.reachHour, tow.pickupHour, tow.arriveHour);
             page.TowMap(Ports.ByName(tow.from), new Vector3(tow.atX, 0f, tow.atZ), Ports.ByName(tow.to), tug, BoardPage.TripMapPlace, BoardPage.TripMapScale);
         }

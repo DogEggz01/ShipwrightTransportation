@@ -120,7 +120,7 @@ namespace ShipwrightAndTransport
         private static readonly OnceEach taken = new OnceEach();
 
         // A good touched the drop area (§8.3): taken when this shipyard has an open order that still needs it, the item is
-        // sold and not mission cargo, and it is not in an inventory slot. Otherwise it is left, with the reason.
+        // sold, neither mission cargo nor financed, and it is not in an inventory slot. Otherwise it is left, with the reason.
         internal static void Offer(string shipyard, Good good)
         {
             if (!good || State.Off) return;
@@ -129,6 +129,10 @@ namespace ShipwrightAndTransport
             var order = OrderAt(shipyard);
             if (order == null) { Notify.Show("No order at this shipyard."); return; }
             if (good.GetAssignedMission() != null) { Notify.Show("That is mission cargo."); return; }
+            // On an EconomyOverhaul Respondentia loan, its destruction here would close the loan with nothing charged (that mod's
+            // Loans.UnexpectedRemoval), so the material would be free (the user, 2026-11-06: "Yes, add it").
+            var save = item.GetComponent<SaveablePrefab>();
+            if (save && Compat.EconomyOverhaul.IsFinanced(save.instanceId)) { Notify.Show("That is financed cargo."); return; }
             int kind = Array.IndexOf(Goods, item.name);
             var bill = BillFor(order.hull);
             if (Building(order) || kind < 0 || order.delivered[kind] >= bill.Amounts[kind]) { Notify.Show("Not needed for this ship."); return; }
@@ -902,11 +906,13 @@ namespace ShipwrightAndTransport
         // before is a live ship in her parking slot: switched off for good there (root, deck, anchor), out of the game's
         // switcher, so nothing shows her again, and out of the save registry, so no list, fee or save sees her or her packed
         // cargo. Not destroyed: other mods may hold references to her as to any parked ship, and would throw on a destroyed one.
-        internal static void Retire(CopyRecord copy)
+        // A copy that joined EconomyOverhaul's trade fleet (§5.11) leaves the same way; `why` names which, for the log.
+        internal static void Retire(CopyRecord copy, string why = "sold")
         {
             if (copy == null) return;
             State.Save.copies.Remove(copy);
             int block = IndexOf(copy.k);
+            CacheFrames.Forget(block);
             var boat = Ships.BoatOf(block);
             if (boat)
             {
@@ -926,7 +932,7 @@ namespace ShipwrightAndTransport
             var objects = SaveLoadManager.instance ? SaveLoadManager.instance.GetCurrentObjects() : null;
             if (objects != null)
                 for (int i = block; i < block + BlockSize && i < objects.Length; i++) objects[i] = null;
-            Log.Info("Copies: copy " + copy.k + " (hull " + copy.hull + ") sold" + (boat ? "; switched off where she lay, gone from the next load." : "; she was never built."));
+            Log.Info("Copies: copy " + copy.k + " (hull " + copy.hull + ") " + why + (boat ? "; switched off where she lay, gone from the next load." : "; she was never built."));
         }
 
         // A new copy record: the next k, never reused. The number is given at completion (decision 50).
@@ -1513,8 +1519,9 @@ namespace ShipwrightAndTransport.Compat
     // VirtualCrew 0.2.2 keeps each ship's setup under a "vessel key", the hull model's name without "(Clone)", so a copy
     // would share her original's setup. A transpiler on its four key sites appends " #n" (the copy's number within her
     // type, decision 50) for copies; renaming never changes the key, so the setup is never lost (draft, "VirtualCrew
-    // patch"). All or nothing: if any site doesn't match exactly once, nothing is patched.
-    public static class VirtualCrew
+    // patch"). All or nothing: if any site doesn't match exactly once, nothing is patched. Its automation kept off a ship in
+    // service (D8) is in Sailing.cs.
+    public static partial class VirtualCrew
     {
         private const string Guid = "com.zorkinian.virtualcrew";
 

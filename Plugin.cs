@@ -28,13 +28,14 @@ namespace ShipwrightAndTransport
     [BepInIncompatibility(StorageGuid)]
     public sealed class Plugin : BaseUnityPlugin
     {
-        public const string Guid = "DogEggz.ShipwrightTransport", PluginName = "Shipwright and Transport", Version = "0.1.3";
+        public const string Guid = "DogEggz.ShipwrightTransport", PluginName = "Shipwright and Transport", Version = "0.2.0";
         internal const string StorageGuid = "DogEggz.ShipwrightandStorage";
 
         internal static Plugin Instance;
         internal static ConfigEntry<KeyboardShortcut> StatusKey;
         internal static ConfigEntry<bool> InstantShips;
         internal static ConfigEntry<bool> UnlockVisitedPlates;
+        internal static ConfigEntry<float> CargoFeePercent;
         private static Harmony harmony;
         private static bool latePatched;
 
@@ -45,14 +46,21 @@ namespace ShipwrightAndTransport
             StatusKey = Config.Bind("Debug", "Status key", new KeyboardShortcut(KeyCode.F6, KeyCode.LeftControl),
                 "Writes Shipwright's view of your ships, the shipyards and their fees to the BepInEx log.");
             InstantShips = Config.Bind("Building", "Instant ships", false,
-                "On: ordering a ship finishes her at once, with no materials and no building time, and she goes straight into storage at that " +
+                "On: ordering a ship finishes it at once, with no materials and no building time, and it goes straight into storage at that " +
                 "shipyard. The building fee is still paid. An order already open finishes at the next clock check.");
             UnlockVisitedPlates = Config.Bind("Plates", "Unlock visited regions", false,
                 "Off: each shipyard sells only its own region's two name plates. On: once you have visited one of a region's shipyards " +
                 "(used or looked at its documents), that region's two plates are sold at every shipyard too. Visits count whether this is on or off.");
+            // The user (2026-11-09): "Currently it's 1% of value, add option for 0.75%, 0.5%, 0.25%, 0%. default still 1%."
+            CargoFeePercent = Config.Bind("Storage", "Cargo fee percent", Fees.CargoDailyPercentDefault, new ConfigDescription(
+                "The daily storage fee's cargo part: this percent of the value of the cargo stored with the ship, on top of the shipyard fee. " +
+                "1, 0.75, 0.5, 0.25 or 0. A change counts at once, for every day a ship has already been stored too.",
+                new AcceptableValueList<float>(Fees.CargoDailyPercents)));
             Log.Init(Logger, debugLog);
             PlateBundle.Load(Path.GetDirectoryName(Info.Location));
             Patch();
+            // The sailing transport's hooks (Sailing.cs): all or nothing; without them every transport goes on paper.
+            Sailing.Voyages.Init(Config, harmony);
             SceneManager.sceneLoaded += OnSceneLoaded;
             Log.Info(PluginName + " " + Version + " loaded");
         }
@@ -77,8 +85,16 @@ namespace ShipwrightAndTransport
             if (State.Off || !GameState.playing || GameState.currentlyLoading) return;
             Step(Parking.Tick);
             Step(() => Transport.Tick());
+            Step(Sailing.Voyages.Update);
             Step(() => Orders.Tick());
             Step(DropAreas.Tick);
+        }
+
+        // The sailors steer and trim every physics step (Sailing.cs).
+        private void FixedUpdate()
+        {
+            if (State.Off || !GameState.playing || GameState.currentlyLoading) return;
+            Step(Sailing.Voyages.FixedUpdate);
         }
 
         private static void Step(Action tick)
@@ -166,6 +182,23 @@ namespace ShipwrightAndTransport
             return true;
         }
 
+        // Another mod's one-line text broken at spaces into the scroll's lines (EconomyOverhaul's trade fleet refusals, §5.11); a
+        // word longer than a line stays whole, and what doesn't fit in the lines goes on the last.
+        internal static string Wrap(string text)
+        {
+            if (string.IsNullOrEmpty(text) || text.IndexOf('\n') >= 0) return text;
+            var lines = new List<string>();
+            string line = "";
+            foreach (var word in text.Split(' '))
+            {
+                if (word.Length == 0) continue;
+                if (line.Length > 0 && line.Length + 1 + word.Length > MaxLineLength && lines.Count < MaxLines - 1) { lines.Add(line); line = word; }
+                else line = line.Length == 0 ? word : line + " " + word;
+            }
+            lines.Add(line);
+            return string.Join("\n", lines.ToArray());
+        }
+
         internal static void Show(string text, float seconds = 0f)
         {
             if (!Fits(text)) Log.Warn("Notification too long for the scroll: \"" + text.Replace("\n", " / ") + "\"");
@@ -250,6 +283,15 @@ namespace ShipwrightAndTransport
                     value = Storage.CargoValue(index);
                     pounds = Weights.CargoPounds(index, null);
                     CacheItems.Invoke(items, null);
+                    CacheFrames.Packed(index, items.transform.rotation);
+                }
+                else
+                {
+                    CacheFrames.KeepIfPacked(index, items, items.transform.rotation);
+                    // Decision 234: the game packed her already (a voyage's end on paper): counted as the tow's quote counts her, or she
+                    // was stored with cargo worth nothing, her storage fee and next transport's speed with it.
+                    value = (int)Math.Min(int.MaxValue, (long)Storage.CargoValue(index) + Storage.CachedCargoValue(items));
+                    pounds = Weights.CargoPounds(index, items);
                 }
                 items.SetItemsLoaded(true);
             }
@@ -445,7 +487,10 @@ namespace ShipwrightAndTransport
         // would (BoatHorizonPerformanceSwitcher: her root active while she is nearer than fullySunkDistance); its 10-20 s pause
         // is cleared too. The horizon measures only in its Update, which returns at once while a shipyard menu is open: a ship
         // taken out from her far parking slot stayed switched off in the menu until the player left it and came back (the
-        // user's test of 0.1.0, 2026-10-28; a new copy too, cloned with her template's far distance).
+        // user's test of 0.1.0, 2026-10-28; a new copy too, cloned with her template's far distance). Measured only within the
+        // horizon's 1 km of the player (the take-out measures her at the edit spot): a far ship (the sailing's callers) is left
+        // to the horizon's next Update, kinematic state included; measured directly, she would start its 10-20 s pause before
+        // that Update ran.
         internal static void RefreshHorizon(Component boat)
         {
             if (!boat) return;
@@ -454,6 +499,8 @@ namespace ShipwrightAndTransport
                 foreach (var horizon in boat.GetComponentsInChildren<BoatHorizon>(true))
                 {
                     HorizonCooldown.SetValue(horizon, 0f);
+                    bool near = Refs.observerMirror && Vector3.Distance(horizon.transform.position, Refs.observerMirror.transform.position) <= 1000f;
+                    if (!near) continue;
                     HorizonDistanceCheck.Invoke(horizon, null);
                     var root = horizon.transform.parent;
                     if (root && !root.gameObject.activeSelf && horizon.distanceToPlayer < horizon.fullySunkDistance) root.gameObject.SetActive(true);
@@ -461,6 +508,36 @@ namespace ShipwrightAndTransport
             }
             catch (Exception e) { Report("BoatHorizon.DistanceCheck", e is TargetInvocationException t && t.InnerException != null ? t.InnerException : e); }
         }
+
+        // A world shift (every 512 m) readies every ship, switched on or off (FloatingOriginManager.NewShift →
+        // ShiftingRigidbody.PrepareForShifting: her shifting flag, and her BoatProbes.dontUpdateVelocity where stopProbes is set),
+        // but RestoreMomentum gives that back only to a ship switched on. So a ship hidden through a shift keeps both until a shift
+        // finds her on (Shipwright and Storage's run 20261010-092446, S10): her water drag damps by a smoothed, lagging velocity
+        // (BoatProbes.FixedUpdateDrag) and BoatPhysicsSwitcher keeps her interpolation off. A stored ship lies hidden in her
+        // parking slot, and a take-out brings her to a player standing at the yard with no shift in between: players saw such
+        // ships "bouncing up and down in water" after Exit (the user, 2026-11-08). Once she is on and no shift is under way (one
+        // under way gives it back itself), this clears it the game's own way. True when it did.
+        internal static bool ClearStaleShift(Component boat)
+        {
+            if (!boat || WorldShifting()) return false;
+            try
+            {
+                var shifting = boat.GetComponent<ShiftingRigidbody>();
+                if (!shifting || !shifting.gameObject.activeInHierarchy) return false;
+                var probes = boat.GetComponent<Crest.BoatProbes>();
+                // dontUpdateVelocity alone: RestoreMomentum clears the flag at once but the probes only frames later, so a ship
+                // switched off in between keeps them stopped.
+                if (!shifting.IsShifting() && !(probes && probes.dontUpdateVelocity)) return false;
+                shifting.RestoreMomentum();
+                return true;
+            }
+            catch (Exception e) { Report("ShiftingRigidbody.RestoreMomentum", e); return false; }
+        }
+
+        private static readonly AccessTools.FieldRef<FloatingOriginManager, bool> ManagerShifting = AccessTools.FieldRefAccess<FloatingOriginManager, bool>("shifting");
+
+        // A world shift is under way (its first frame, or the manager's coroutine still running).
+        internal static bool WorldShifting() => FloatingOriginManager.ShiftingThisFrame || FloatingOriginManager.instance && ManagerShifting(FloatingOriginManager.instance);
 
         internal static void SetBoatRecovered()
         {
@@ -527,14 +604,27 @@ namespace ShipwrightAndTransport
         // Her cargo in the fees (SPEC.md §4.6, the user: "Add 15% of all item's value on ship to transportation fee, and
         // 1% as storage fee (daily)"; 0.1.2: "change the cargo value portion in transport fee to 20%"). cargoUnits is the sum of
         // the items' ShipItem.value aboard her, the game's base value, in the units the fees use (an item's coins are its value
-        // × the rate, as a shop's). Each share is rounded to whole units.
-        internal const float CargoDailyShare = 0.01f, CargoTransportShare = 0.2f;
+        // × the rate, as a shop's). Each share is rounded to whole units. The daily share is `[Storage] Cargo fee percent`
+        // (the user, 2026-11-09: 1%, 0.75%, 0.5%, 0.25% or 0%, 1% by default), read at each use; 1% without the config (host tests).
+        internal const float CargoDailyPercentDefault = 1f, CargoTransportShare = 0.2f;
+        internal static readonly float[] CargoDailyPercents = { 1f, 0.75f, 0.5f, 0.25f, 0f };
 
-        internal static int CargoDailyUnits(int cargoUnits) => Round((float)Math.Max(0, cargoUnits) * CargoDailyShare);
+        internal static float CargoDailyPercent
+        {
+            get
+            {
+                float percent = Plugin.CargoFeePercent != null ? Plugin.CargoFeePercent.Value : CargoDailyPercentDefault;
+                return Array.IndexOf(CargoDailyPercents, percent) >= 0 ? percent : CargoDailyPercentDefault;
+            }
+        }
+
+        internal static int CargoDailyUnits(int cargoUnits) => CargoDailyUnits(cargoUnits, CargoDailyPercent);
+
+        internal static int CargoDailyUnits(int cargoUnits, float percent) => Round((float)Math.Max(0, cargoUnits) * (percent * 0.01f));
 
         internal static int CargoTransportUnits(int cargoUnits) => Round((float)Math.Max(0, cargoUnits) * CargoTransportShare);
 
-        // A stored ship's daily fee in units: her ship's (the shipyard fee) and 1% of her cargo.
+        // A stored ship's daily fee in units: the ship's (the shipyard fee) and its cargo's share (CargoDailyPercent).
         internal static int StorageUnits(int shipUnits, int cargoUnits) => shipUnits + CargoDailyUnits(cargoUnits);
 
         // Midnights passed: storing and collecting on the same day is free (decision 30).
@@ -932,17 +1022,19 @@ namespace ShipwrightAndTransport
             var facts = new ShipFacts();
             var stored = Storage.RecordOf(ship.Index);
             var transport = Transport.RecordOf(ship.Index);
+            facts.HeldUp = Transport.HeldUp(transport);
             if (transport != null && Transport.HasLeft(transport))
             {
                 facts.GoingTo = transport.to;
-                facts.ArrivesDay = GameClock.DayOf(transport.arriveHour);
+                facts.ArrivesDay = GameClock.DayOf(Transport.ExpectedArrival(transport));
                 facts.UnderTow = transport.tow;
             }
             // A tow not picked up yet: she is still where she lies.
             else if (transport != null && transport.tow) facts.TowTo = transport.to;
-            else if (stored != null)
+            else if (stored != null || transport != null && transport.mode == 1)
             {
-                facts.StoredAt = stored.shipyard;
+                // A sailing ship waiting at the origin berth has no storage record; she reads as stored there, leaving.
+                facts.StoredAt = stored != null ? stored.shipyard : transport.from;
                 if (transport != null)
                 {
                     facts.WaitingForSailors = true;
@@ -1105,6 +1197,7 @@ namespace ShipwrightAndTransport
         internal int LeavesDay, ArrivesDay;
         internal bool UnderTow;             // in transit behind a tug
         internal string TowTo;              // a tow booked, not picked up yet: its destination, or null
+        internal bool HeldUp;               // her sailing voyage hasn't gone on for a day (decision 98)
     }
 
     // Where a ship is (§4.7): the first rule that matches wins. `here` is the board's shipyard, or null.
@@ -1112,6 +1205,9 @@ namespace ShipwrightAndTransport
     {
         // Game miles (64.3 m each). The draft's 1 and 5 were too small: the docks stand 35–95 m from their port's position.
         internal const float MooredAtMiles = 30f, AnchoredNearMiles = 80f, AtSeaNearMiles = 1f;
+
+        // Decision 98: a sailing voyage that hasn't gone on for a day.
+        internal const string HeldUp = "held up";
 
         internal static Where Decide(ShipFacts f, string here)
         {
@@ -1156,7 +1252,7 @@ namespace ShipwrightAndTransport
             {
                 case Where.InShipyard: return "in the shipyard";
                 case Where.StoredElsewhere: return "at " + f.StoredAt;
-                case Where.OnTheWay: return "to " + f.GoingTo + ", day " + f.ArrivesDay;
+                case Where.OnTheWay: return "to " + f.GoingTo + (f.HeldUp ? ", " + HeldUp : ", day " + f.ArrivesDay);
                 case Where.TowBooked: return "to " + f.TowTo;
                 case Where.Sunk: return f.NearestPort == null ? "" : "near " + f.NearestPort;
                 case Where.Moored: return f.NearestPort == null ? "" : AtOrNear(f);
@@ -1175,10 +1271,10 @@ namespace ShipwrightAndTransport
             switch (where)
             {
                 case Where.InShipyard: return "in the shipyard";
-                case Where.LeavingHere: return "leaves day " + f.LeavesDay;
-                case Where.ArrivingHere: return "arrives day " + f.ArrivesDay;
+                case Where.LeavingHere: return f.HeldUp ? HeldUp : "leaves day " + f.LeavesDay;
+                case Where.ArrivingHere: return f.HeldUp ? HeldUp : "arrives day " + f.ArrivesDay;
                 case Where.StoredElsewhere: return f.WaitingForSailors ? "leaves day " + f.LeavesDay : "stored at " + f.StoredAt;
-                case Where.OnTheWay: return (f.UnderTow ? "under tow to " : "to ") + f.GoingTo;
+                case Where.OnTheWay: return (f.UnderTow ? "under tow to " : "to ") + f.GoingTo + (f.HeldUp ? ", " + HeldUp : "");
                 case Where.TowBooked: return "tow to " + f.TowTo;
                 case Where.Sunk: return "sunk";
                 case Where.Moored: return f.NearestPort == null ? "moored" : AtOrNear(f);
@@ -1303,6 +1399,31 @@ namespace ShipwrightAndTransport
         // The regions whose shipyards were visited, bit r for Shipyard.region r (0 Al'Ankh, 1 Emerald, 2 Aestrin), for the
         // plates' unlock (§9.10). A save from before it has none.
         public int visitedRegions;
+        // Decision 198 (a): each hull type's turning circle as her sailor measured it (Sailing.TurnCircle).
+        public List<TurnCircleRecord> turnCircles = new List<TurnCircleRecord>();
+        // Each packed ship's rotation when its items were packed, by save index (Storage.cs, CacheFrames). cacheFramesKept is
+        // false in a save from before them (0.1.3 and earlier), whose packed ships are then marked unknown once.
+        public List<CacheFrame> cacheFrames = new List<CacheFrame>();
+        public bool cacheFramesKept;
+    }
+
+    // A ship's rotation when the items aboard were packed into its cache (CacheFrames), x y z w of the quaternion. known is
+    // false for a ship a save from before these frames holds packed: its items come back as they did in 0.1.3.
+    [Serializable]
+    public sealed class CacheFrame
+    {
+        public int saveIndex;
+        public bool known;
+        public float x, y, z, w = 1f;
+    }
+
+    // Decision 198 (a): a hull type's measured turning circle: the hull type (her rig descriptor, as her voyage's booking keeps it),
+    // and the radii of her tightest turns with the helm hard over (metres), turning toward the wind and away from it.
+    [Serializable]
+    public sealed class TurnCircleRecord
+    {
+        public string hull = "";
+        public float[] toward = new float[0], away = new float[0];
     }
 
     [Serializable]
@@ -1344,6 +1465,12 @@ namespace ShipwrightAndTransport
     // from the pickup. Both legs are paid in `currency`; towFee is paid back if she leaves her place at booking (atX, atZ,
     // real coordinates: the floating origin's shift taken out). Her length and cargo (its value, and from 0.1.2 its weight
     // with her own mass, for the tow leg's speed) are measured at booking.
+    // A sailing booking (mode 1; Sailing.cs, SAILING_TRANSPORT_DRAFT.md; mode 0 is paperwork, every tow and every booking of a save
+    // from before it): she leaves storage at the booking, waits moored at the origin berth (phase 0), sails (phase 1), lies moored
+    // at the destination (phase 2) until storeHour, and is stored there; lengthM and feeUnits carry her storage record's values
+    // across. goingOnHour: the last game hour her voyage went on (sailed or held getting somewhere, decision 233, or lay moored), -1 before it first did; a day without
+    // that is held up (decision 98, Transport.HeldUp). paperHour (decision 206): the game hour her held-up voyage went on paper
+    // (Transport.PaperArrival), -1 while it hasn't.
     [Serializable]
     public sealed class TransportRecord
     {
@@ -1356,6 +1483,45 @@ namespace ShipwrightAndTransport
         public double reachHour, pickupHour = -1, nearHour = -1;
         public bool reachedTold, cratesTold;
         public int cratesTaken;
+        public int mode, phase;
+        public double storeHour = -1;
+        public int feeUnits;
+        public SailingJob job;
+        public double goingOnHour = -1, paperHour = -1;
+    }
+
+    // A sailing booking's voyage (the prototype's TransportJob, in Shipwright's own JSON: doubles are written exactly, so the
+    // prototype's hexadecimal progress encoding isn't needed). Stable (unshifted) world coordinates throughout.
+    [Serializable]
+    public sealed class SailingJob
+    {
+        public string jobId = "", vesselName = "", rig = "";
+        public float[] routeX = new float[0], routeZ = new float[0];
+        public int waypoint = 1, tack, revision;
+        public bool departureComplete;
+        public bool unberthing;          // her lines are gone and she is still coming off the dock (decisions 110-111)
+        public bool toBerth;             // released by the shipyard, the tow still bringing her to her berth (decisions 114, 117)
+        public double[] progressState;
+        public float deployment = 1, savedSpeed, referenceWind;
+        public string[] bodyPaths;
+        public bool[] bodyKinematic;
+        // The destination berth once read from the live shipyard (berthKnown), until then the destination port.
+        public float destinationX, destinationZ, dockHeading;
+        public bool berthKnown;
+        public int dockingPhase;
+        // The clock (D7): metres done along the route, the hour they were counted at, metres per game hour, the route's length.
+        public double done, clockHour, speed, length;
+        // She reached the route's end far from the player and counts as moored there (D4).
+        public bool onPaper;
+        // She is clear of her origin shipyard (its area and its release spot); until then it stays closed (decision 218).
+        public bool leftOrigin;
+        // Kicia Bay's tow out of its channel is done (decision 220); never again for this voyage.
+        public bool towedOut;
+        // Decision 222: her destination's anchor spot (stable metres) once chosen, and her stage there: 0 on her way to it, 1 at anchor
+        // (her harbour charted meanwhile), 2 weighed and sailing in.
+        public bool anchorKnown;
+        public float anchorX, anchorZ;
+        public int anchorStage;
     }
 
     // A built copy of a vanilla hull (§7). Its state is the game's own save data for its objects and items,
@@ -1457,6 +1623,16 @@ namespace ShipwrightAndTransport
             if (save.nextCopy < 1) save.nextCopy = 1;
             if (save.parkingField != 0 && save.parkingField != 1) save.parkingField = 0;
             save.visitedRegions &= PlateRegions.AllRegions;
+            // A sailing booking can't sail without its voyage: it keeps the paperwork rules, which leave a ship that isn't
+            // stored where she is.
+            foreach (var transport in save.transports)
+            {
+                if (transport.mode != 1 || transport.job == null) { transport.mode = 0; transport.job = null; transport.phase = 0; continue; }
+                if (transport.phase < 0 || transport.phase > 2) transport.phase = 0;
+            }
+            save.turnCircles = Unique(save.turnCircles, c => c != null && !string.IsNullOrEmpty(c.hull), c => c.hull);
+            foreach (var circle in save.turnCircles) { circle.toward = circle.toward ?? new float[0]; circle.away = circle.away ?? new float[0]; }
+            save.cacheFrames = Unique(save.cacheFrames, f => f != null && f.saveIndex > 0, f => f.saveIndex);
             return save;
         }
 
@@ -1517,6 +1693,10 @@ namespace ShipwrightAndTransport
                     return;
                 }
                 State.Save.version = SaveCodec.CurrentVersion;
+                State.Save.cacheFramesKept = true;
+                Sailing.Voyages.CaptureForSave();
+                // Decision 198 (a): every hull type's measured turning circle.
+                State.Save.turnCircles = Sailing.TurnCircle.Capture();
                 CopyEngine.CaptureForSave();
                 string json = SaveJson.Write(State.Save);
                 GameState.modData[State.Key] = json;
@@ -1533,7 +1713,9 @@ namespace ShipwrightAndTransport
     {
         private static void Prefix()
         {
+            Sailing.Voyages.Reset();
             State.Reset();
+            Sailing.TurnCircle.Reset();
             GameState.modData?.Remove(State.Key);
         }
     }
@@ -1550,6 +1732,7 @@ namespace ShipwrightAndTransport
             Run("restoring copies", CopyEngine.RestoreAll);
             Run("transport arrivals", () => Transport.Tick(true));
             Run("order completions", () => Orders.Tick(true));
+            Run("sailing voyages", Sailing.Voyages.AfterLoad);
             if (Log.Verbose) Run("crate check", () => Plugin.Instance.StartCoroutine(Storage.LogCratesAfterLoad()));
         }
 
@@ -1575,9 +1758,17 @@ namespace ShipwrightAndTransport
                 var save = SaveJson.Read<ShipwrightSave>(json);
                 if (save == null) { State.TurnOff(json, "This save's Shipwright data could not be read."); return false; }
                 State.Save = SaveCodec.Normalize(save);
+                if (!State.Save.cacheFramesKept)
+                {
+                    int unknown = CacheFrames.FromOlderSave();
+                    State.Save.cacheFramesKept = true;
+                    if (unknown > 0) Log.Info("Packed items: this save is from before their rotation was kept; " + unknown + " packed ship(s) bring their items back as before.");
+                }
+                // Decision 198 (a): the hull types' turning circles this save remembers.
+                Sailing.TurnCircle.Restore(State.Save.turnCircles);
                 Log.Info("loaded (data version " + SaveCodec.PeekVersion(json) + ": " + State.Save.stored.Count + " stored, " +
                     State.Save.transports.Count + " in transport, " + State.Save.copies.Count + " copies, " + State.Save.orders.Count + " orders, " +
-                    State.Save.plates.Count + " plates, " + State.Save.names.Count + " typed names)");
+                    State.Save.plates.Count + " plates, " + State.Save.names.Count + " typed names, " + State.Save.turnCircles.Count + " turning circles)");
                 return true;
             }
             catch (Exception e) { State.TurnOff(json, "This save's Shipwright data could not be read (" + e.Message + ")."); return false; }
@@ -1596,7 +1787,9 @@ namespace ShipwrightAndTransport
     {
         private static void Postfix()
         {
+            Sailing.Voyages.Reset();
             State.Reset();
+            Sailing.TurnCircle.Reset();
             GameState.modData?.Remove(State.Key);
             Log.Info("new game: reset");
         }
@@ -1889,7 +2082,19 @@ namespace ShipwrightAndTransport
         {
             // While the plate's size is previewed, the click brings the plate page back (even with a ship in the area).
             if (Board.ResumeFromPreview(__instance)) return false;
-            if (!Documents.Serves(__instance) || __instance.shipyard.GetBoatsInTriggerCount() != 0) return true;
+            // A ship in a sailing transport's service never counts in the area (SailingPatches.ShipyardAreaPrefix); while one waits
+            // at the shipyard, comes in to its release spot or lies there, the shipyard admits no ship (decisions 106, 203, 218: the
+            // ship's Exit would put her onto the one in service).
+            if (!Documents.Serves(__instance)) return true;
+            int count = __instance.shipyard.GetBoatsInTriggerCount();
+            if (count == 1)
+            {
+                string refusal = Sailing.Voyages.ReleaseRefusal(Shipyards.InfoOf(__instance.shipyard));
+                if (refusal == null) return true;
+                Notify.Show(refusal);
+                return false;
+            }
+            if (count != 0) return true;
             Board.Open(__instance);
             return false;
         }
@@ -2827,25 +3032,54 @@ namespace ShipwrightAndTransport.Compat
             return (Func<int, bool>)Delegate.CreateDelegate(typeof(Func<int, bool>), method);
         }
 
+        // A static method of another mod as a delegate of type T, found by its exact parameter types; null when it isn't there or
+        // its return type isn't T's.
+        internal static T Static<T>(Type type, string methodName, params Type[] parameters) where T : Delegate
+        {
+            var method = type != null ? AccessTools.Method(type, methodName, parameters) : null;
+            if (method == null || !method.IsStatic || method.ReturnType != typeof(T).GetMethod("Invoke").ReturnType) return null;
+            return Delegate.CreateDelegate(typeof(T), method, false) as T;
+        }
+
         // Patches applied once the main scene loads, when every plugin is loaded.
         internal static void ApplyLatePatches(Harmony harmony)
         {
             EconomyOverhaul.PatchOwnShips(harmony);
             VirtualCrew.Apply(harmony);
+#if SAILING
+            // The sailing's own guard (Sailing.cs): Virtual Crew kept off a ship in service.
+            VirtualCrew.KeepOffShipsInService(harmony);
+#endif
+            Sailing.SailingPatches.HoldCustomIslandUnload(harmony);
+            Sailing.CompatibilityGate.Settle();
         }
     }
 
     // EconomyOverhaul, the user's economy mod (§13). A rented ship has extraSetting set, so she would pass the owned
-    // test (decision 85); a pledged ship is collateral for a bottomry loan (decision 87).
+    // test (decision 85); a pledged ship is collateral for a bottomry loan (decision 87); financed cargo refuses a sale (§5.10);
+    // its trade office's fleet takes a stored copy (§5.11).
     internal static class EconomyOverhaul
     {
         private static bool resolved, failed;
-        private static Func<int, bool> isRented, isPledged;
+        private static Func<int, bool> isRented, isPledged, isFinanced;
         private static Func<int, object> seized;
         private static Action<PurchasableBoat> showSale;
+        private static Func<int, int, string> fleetRefusal;
+        private static Func<GameObject, string> fleetRig;
+        private static Func<int, int, string, string, int> fleetAdd;
 
         internal static bool IsRented(int saveIndex) { Resolve(); return Ask(isRented, saveIndex); }
         internal static bool IsPledged(int saveIndex) { Resolve(); return Ask(isPledged, saveIndex); }
+        internal static bool IsFinanced(int itemId) { Resolve(); return Ask(isFinanced, itemId); }
+
+        // The trade office's fleet (§5.11; EconomyOverhaul's TRADE_OFFICE_DRAFT.md §4.5): its public OfficeFleetApi, whose names that
+        // mod keeps stable. Refusal: why a ship of a hull can't join from a yard of a region (EconomyOverhaul's numbering, 0 Al'Ankh,
+        // 1 Emerald, 2 Aestrin), null when she can. RigOf: her rig as she stands, read off the parked ship (her hull's part options and
+        // her sails), null when it can't be read. Add: her trader id, or -1 (its refusals it shows itself).
+        internal static bool FleetKnown { get { Resolve(); return FleetKnownResolved; } }
+        internal static string FleetRefusal(int region, int hull) { Resolve(); return fleetRefusal == null ? "Not available" : Ask(() => fleetRefusal(region, hull), "Not available"); }
+        internal static string FleetRig(GameObject boat) { Resolve(); return fleetRig == null ? null : Ask(() => fleetRig(boat), null); }
+        internal static int FleetAdd(int region, int hull, string name, string rig) { Resolve(); return fleetAdd == null ? -1 : Ask(() => fleetAdd(region, hull, name, rig), -1); }
 
         private static void Resolve()
         {
@@ -2854,12 +3088,21 @@ namespace ShipwrightAndTransport.Compat
             if (!Mods.Installed(Mods.EconomyOverhaulGuid)) return;
             isRented = Mods.StaticBool("EconomyOverhaul.Rentals", "IsIndex");
             isPledged = Mods.StaticBool("EconomyOverhaul.Bottomry", "Pledged");
+            isFinanced = Mods.StaticBool("EconomyOverhaul.Loans", "Financed");
             seized = SeizedQuery(AccessTools.TypeByName("EconomyOverhaul.Bottomry"));
             showSale = ShowSaleAction(AccessTools.TypeByName("EconomyOverhaul.Pledges"));
+            var fleet = AccessTools.TypeByName("EconomyOverhaul.OfficeFleetApi");
+            fleetRefusal = Mods.Static<Func<int, int, string>>(fleet, "Refusal", typeof(int), typeof(int));
+            fleetRig = Mods.Static<Func<GameObject, string>>(fleet, "RigOf", typeof(GameObject));
+            fleetAdd = Mods.Static<Func<int, int, string, string, int>>(fleet, "Add", typeof(int), typeof(int), typeof(string), typeof(string));
             Log.Info("EconomyOverhaul found. Rented ships: " + (isRented != null ? "recognised" : "NOT recognised, so they count as owned") +
                 ". Bottomry pledges: " + (isPledged != null ? "recognised" : "NOT recognised") +
-                ". Seized ships: " + (seized != null && showSale != null ? "recognised" : "NOT recognised, so a copy it seized is yours again after a load") + ".");
+                ". Seized ships: " + (seized != null && showSale != null ? "recognised" : "NOT recognised, so a copy it seized is yours again after a load") +
+                ". Financed cargo: " + (isFinanced != null ? "recognised" : "NOT recognised, so a sale can't refuse it and its loan stays open") +
+                ". Trade fleet: " + (FleetKnownResolved ? "recognised" : "NOT recognised, so no Add to trade fleet button") + ".");
         }
+
+        private static bool FleetKnownResolved => fleetRefusal != null && fleetRig != null && fleetAdd != null;
 
         // EconomyOverhaul 0.8.x: Bottomry.Seized(int) gives a ship's seized record (SeizedPledge), or null.
         internal static Func<int, object> SeizedQuery(Type bottomry)
@@ -2904,14 +3147,16 @@ namespace ShipwrightAndTransport.Compat
             }
         }
 
-        private static bool Ask(Func<int, bool> query, int saveIndex)
+        private static bool Ask(Func<int, bool> query, int id) => query != null && Ask(() => query(id), false);
+
+        // A call into EconomyOverhaul; what it throws is logged once and gives the fallback.
+        private static T Ask<T>(Func<T> call, T fallback)
         {
-            if (query == null) return false;
-            try { return query(saveIndex); }
+            try { return call(); }
             catch (Exception e)
             {
                 if (!failed) { failed = true; Log.Warn("Asking EconomyOverhaul failed: " + e.Message); }
-                return false;
+                return fallback;
             }
         }
 
@@ -2998,3 +3243,67 @@ namespace ShipwrightAndTransport.Compat
         }
     }
 }
+
+#if !SAILING
+// ==== The release build's stand-in for the sailing transport ====
+
+// The sailing transport (Source\Sailing.cs) is left out of the release build (the user, 2026-11-08: "I don't want to release the
+// sailing part yet", by the csproj's Sailing switch). These are its entry points as the other files call them, answering as the
+// sailing does with [Sailing] Ships sail off: every transport and tow goes on paper, nothing waits at a berth, nothing sails. A save's
+// turning circles (written by a build with the sailing) are kept as they were. Built with -p:Sailing=true, Sailing.cs replaces this.
+namespace ShipwrightAndTransport.Sailing
+{
+    internal static class Voyages
+    {
+        internal const string Off = "Sailing transport is off.";
+
+        internal static void Init(ConfigFile config, Harmony harmony) { }
+        internal static void Update() { }
+        internal static void FixedUpdate() { }
+        internal static void CaptureForSave() { }
+        internal static void Reset() { }
+        internal static void AfterLoad() { }
+        internal static Voyage Of(int saveIndex) => null;
+        internal static string WhyCarried(StoredShip stored) => Off;
+        internal static string WhyNoServiceBerth(string from) => null;
+        internal static string BerthRefusal(StoredShip stored, ShipyardInfo info) => null;
+        internal static string ReleaseRefusal(ShipyardInfo info) => null;
+
+        internal static VoyageJob PlanJob(StoredShip stored, Transport.Quote quote, Shipyard yard, out string why)
+        {
+            why = Off;
+            return null;
+        }
+
+        internal static IEnumerator Board(TransportRecord record, StoredShip stored, Shipyard yard) { yield break; }
+    }
+
+    internal sealed class Voyage
+    {
+        internal VoyageJob Job;
+    }
+
+    internal sealed class VoyageJob
+    {
+        internal double done, clockHour, speed, length;
+        internal SailingJob ToRecord() => null;
+    }
+
+    internal static class TurnCircle
+    {
+        internal static List<TurnCircleRecord> Capture() => State.Save.turnCircles ?? new List<TurnCircleRecord>();
+        internal static void Restore(IEnumerable<TurnCircleRecord> records) { }
+        internal static void Reset() { }
+    }
+
+    internal static class SailingPatches
+    {
+        internal static void HoldCustomIslandUnload(Harmony harmony) { }
+    }
+
+    internal static class CompatibilityGate
+    {
+        internal static void Settle() { }
+    }
+}
+#endif
