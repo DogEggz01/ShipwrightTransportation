@@ -601,8 +601,8 @@ namespace ShipwrightAndTransport
                 }
                 GL.End();
                 GL.PopMatrix();
+                // Read into the texture's CPU copy, which GetPixels32 reads; no Apply (PlateFaces.NameMask).
                 read.ReadPixels(new Rect(0, 0, w, h), 0, 0);
-                read.Apply();
                 var pixels = read.GetPixels32();
                 // Read back bottom-up; the canvas is top-down.
                 for (int y = 0; y < h; y++)
@@ -952,6 +952,9 @@ namespace ShipwrightAndTransport
         private static readonly FieldInfo CurrentPrefabs = AccessTools.Field(typeof(SaveLoadManager), "currentPrefabs");
         internal static SaveableObject[] RealObjects;
         internal static List<SaveablePrefab> RealPrefabs;
+        // HideFromSave's map of each item's copy, kept for CaptureForSave in the same save step, which walked every item for it again
+        // (REPORT.md item 5). An item LeaveForTheirCrates moves had owner 0 and keeps it, so the map stays right for the step.
+        private static Dictionary<int, int> SaveOwners;
 
         // The copy block a parent index lies in, or 0: every index from 1000 on is kept out of the vanilla save.
         internal static int BlockOfParent(int parent) => parent >= FirstIndex ? FirstIndex + (parent - FirstIndex) / BlockSize * BlockSize : 0;
@@ -994,6 +997,7 @@ namespace ShipwrightAndTransport
                 if (!prefab || OwnerOf(owners, prefab) == 0) filteredPrefabs.Add(prefab);
             RealObjects = objects;
             RealPrefabs = prefabs;
+            SaveOwners = owners;
             CurrentObjects.SetValue(manager, filteredObjects);
             CurrentPrefabs.SetValue(manager, filteredPrefabs);
             return new object[] { objects, prefabs };
@@ -1043,6 +1047,7 @@ namespace ShipwrightAndTransport
             }
             RealObjects = null;
             RealPrefabs = null;
+            SaveOwners = null;
         }
 
         // Inside SaveModData: each built copy's objects and items, as DoSaveGame would have saved them.
@@ -1060,7 +1065,7 @@ namespace ShipwrightAndTransport
             if (hidden != null) CurrentObjects.SetValue(manager, RealObjects);
             try
             {
-                var owners = ItemOwners(objects, prefabs);
+                var owners = RealObjects != null && SaveOwners != null ? SaveOwners : ItemOwners(objects, prefabs);
                 foreach (var copy in State.Save.copies)
                 {
                     if (!copy.spawned) continue;
@@ -1251,10 +1256,28 @@ namespace ShipwrightAndTransport
     {
         private static MethodBase TargetMethod() => AccessTools.EnumeratorMoveNext(AccessTools.Method(typeof(SaveLoadManager), "DoSaveGame"));
 
+        // DoSaveGame runs in two steps (SaveLoadManager.cs:107-279): the first only sets busy, hides the crate screen and waits for the
+        // frame's end; the second builds and writes the save, then clears busy. So the copies are hidden on a step that starts with busy
+        // set: the one that writes. The first step's filter walked every item for nothing (REPORT.md item 5). Without the field (a game
+        // update), every step is filtered, as before.
+        private static readonly AccessTools.FieldRef<SaveLoadManager, bool> Busy = BusyField();
+
+        private static AccessTools.FieldRef<SaveLoadManager, bool> BusyField()
+        {
+            try { return AccessTools.FieldRefAccess<SaveLoadManager, bool>("busy"); }
+            catch (Exception e) { Log.Warn("Copies: SaveLoadManager.busy not found (" + e.Message + "); copies are hidden on every step of a save."); return null; }
+        }
+
+        internal static bool Writes(bool? busy) => busy != false;
+
         private static void Prefix(out object[] __state)
         {
             __state = null;
-            try { __state = CopyEngine.HideFromSave(); }
+            try
+            {
+                var manager = SaveLoadManager.instance;
+                if (Writes(Busy != null && manager ? Busy(manager) : (bool?)null)) __state = CopyEngine.HideFromSave();
+            }
             catch (Exception e) { Log.Error("Copies: hiding copies from the save failed: " + e); }
         }
 
@@ -1307,7 +1330,7 @@ namespace ShipwrightAndTransport.Compat
 
         private static void AddDavits(GameObject copy, string name)
         {
-            var type = AccessTools.TypeByName("Dinghies.DinghiesPatches");
+            var type = Mods.TypeNamed("Dinghies.DinghiesPatches");
             if (type == null) return;
             try
             {
@@ -1328,11 +1351,11 @@ namespace ShipwrightAndTransport.Compat
         // couldn't pick her cleats by hull: they come with her "towing set".)
         private static void StripTowingSets(GameObject template)
         {
-            var setType = AccessTools.TypeByName("TowableBoats.TowingSet");
+            var setType = Mods.TypeNamed("TowableBoats.TowingSet");
             if (setType == null) return;
             try
             {
-                var cleatType = AccessTools.TypeByName("TowableBoats.TowingCleat");
+                var cleatType = Mods.TypeNamed("TowableBoats.TowingCleat");
                 foreach (var set in template.GetComponentsInChildren(setType, true))
                 {
                     var towing = set.transform.Find("towing set");
@@ -1387,13 +1410,13 @@ namespace ShipwrightAndTransport.Compat
         // registers her stays once, fully wired.
         private static void StripFishermansStays(GameObject template, GameObject original)
         {
-            var registryType = AccessTools.TypeByName("MoreSailwindSails.Stays.FishermansStay.FishermansStayRegistry");
+            var registryType = Mods.TypeNamed("MoreSailwindSails.Stays.FishermansStay.FishermansStayRegistry");
             var registry = registryType != null && original ? original.GetComponent(registryType) : null;
             if (!registry) return;
             int parts = 0, objects = 0, missed = 0;
             try
             {
-                var stayType = AccessTools.TypeByName("MoreSailwindSails.Stays.FishermansStay.FishermansStay");
+                var stayType = Mods.TypeNamed("MoreSailwindSails.Stays.FishermansStay.FishermansStay");
                 var stays = AccessTools.Field(registryType, "Stays")?.GetValue(registry) as IEnumerable;
                 var registered = AccessTools.Field(registryType, "Parts")?.GetValue(registry) as IEnumerable;
                 var auxiliary = AccessTools.Field(registryType, "AuxiliaryObjects")?.GetValue(registry) as IEnumerable<GameObject>;
@@ -1428,7 +1451,7 @@ namespace ShipwrightAndTransport.Compat
                     objects++;
                 }
                 UnityEngine.Object.DestroyImmediate(template.GetComponent(registryType));
-                var winchType = AccessTools.TypeByName("MoreSailwindSails.Controls.WinchControls");
+                var winchType = Mods.TypeNamed("MoreSailwindSails.Controls.WinchControls");
                 var winches = winchType != null ? template.GetComponent(winchType) : null;
                 if (winches) UnityEngine.Object.DestroyImmediate(winches);
             }
@@ -1490,7 +1513,7 @@ namespace ShipwrightAndTransport.Compat
 
         private static void RegisterWithShipyardExpansion(GameObject copy, int hull)
         {
-            var type = AccessTools.TypeByName("ShipyardExpansion.Plugin");
+            var type = Mods.TypeNamed("ShipyardExpansion.Plugin");
             if (type == null) return;
             try
             {
@@ -1542,11 +1565,11 @@ namespace ShipwrightAndTransport.Compat
             if (!Mods.Installed(Guid)) return;
             try
             {
-                var getActive = AccessTools.Method(AccessTools.TypeByName("SailwindVirtualCrew.CrewBoatContextResolver"), "GetActiveWorldBoat");
+                var getActive = AccessTools.Method(Mods.TypeNamed("SailwindVirtualCrew.CrewBoatContextResolver"), "GetActiveWorldBoat");
                 var targets = new List<MethodBase>();
                 foreach (string[] site in KeySites)
                 {
-                    var type = AccessTools.TypeByName(site[0]);
+                    var type = Mods.TypeNamed(site[0]);
                     var method = type != null ? AccessTools.Method(type, site[1]) : null;
                     if (getActive == null || method == null || CountKeySites(PatchProcessor.GetOriginalInstructions(method)) != 1)
                     {

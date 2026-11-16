@@ -96,11 +96,15 @@ namespace ShipwrightAndTransport
             quote.StorageFee = Fees.StorageDue(Fees.StorageDays(GameClock.Day + 1, record.dayStored), Storage.DailyFee(record, quote.StorageCurrency));
             // Sailing or on paper, the fee and the times are the same. Booked at another yard she lies out of the player's sight: on
             // paper (the user, 2026-11-03: "shouldn't any thing not in player's render distance be on paper?").
-            quote.Carried = quote.FromOtherYard ? OtherYard : Sailing.Voyages.WhyCarried(record) ?? Sailing.Voyages.WhyNoServiceBerth(from.Name);
+            // From or to a trade office's wharf she never sails (the user's Q29: "Only paper transport and storage."; no harbour there is
+            // charted and no berth picked).
+            quote.Carried = quote.FromOtherYard ? OtherYard : from.Wharf || to.Wharf ? AtWharf
+                : Sailing.Voyages.WhyCarried(record) ?? Sailing.Voyages.WhyNoServiceBerth(from.Name);
             return quote;
         }
 
         internal const string OtherYard = "Booked at another shipyard.";
+        internal const string AtWharf = "A trade office's wharf: on paper.";
 
         internal const string CarriedInstead = "No clear way out: the\nship is carried instead.";
 
@@ -109,6 +113,8 @@ namespace ShipwrightAndTransport
         internal static bool Book(StoredShip record, Quote quote, Shipyard yard)
         {
             if (RecordOf(record.saveIndex) != null) return false;
+            // An original trading in the fleet stays where it is (FleetKeeping); its page is gone, so this guards a page left open.
+            if (Storage.Trading(record)) { Notify.Show(Storage.InFleet); return false; }
             Sailing.VoyageJob job = null;
             string why = null;
             if (quote.Sails)
@@ -647,6 +653,26 @@ namespace ShipwrightAndTransport
             new Route("Fort Aestrin", "Chronos", 3062),
             new Route("Kicia Bay", "Chronos", 3089),
             new Route("Gold Rock City", "Chronos", 3951),
+            // The trade office wharves' ports (SPEC.md §5.12), from the ports' places in the game's main scene file (level24, Sailwind
+            // 0.40.1, 2026-11-14), which give the six rows above between the game's own yards exactly.
+            new Route("Firefly Grotto", "Fort Aestrin", 36),
+            new Route("Serpent Isle", "Dragon Cliffs", 81),
+            new Route("Oasis", "Gold Rock City", 232),
+            new Route("Serpent Isle", "Kicia Bay", 556),
+            new Route("Oasis", "Kicia Bay", 1290),
+            new Route("Serpent Isle", "Gold Rock City", 1298),
+            new Route("Serpent Isle", "Fort Aestrin", 1307),
+            new Route("Serpent Isle", "Firefly Grotto", 1325),
+            new Route("Oasis", "Fort Aestrin", 1329),
+            new Route("Oasis", "Serpent Isle", 1333),
+            new Route("Oasis", "Firefly Grotto", 1366),
+            new Route("Oasis", "Dragon Cliffs", 1392),
+            new Route("Firefly Grotto", "Dragon Cliffs", 1402),
+            new Route("Firefly Grotto", "Gold Rock City", 1539),
+            new Route("Firefly Grotto", "Kicia Bay", 1764),
+            new Route("Serpent Isle", "Chronos", 2687),
+            new Route("Firefly Grotto", "Chronos", 3042),
+            new Route("Oasis", "Chronos", 3929),
         };
 
         // -1 when the route is not in the table.
@@ -694,7 +720,7 @@ namespace ShipwrightAndTransport
         private void ShowDestinations(int index, string to, bool confirm)
         {
             var record = Storage.RecordOf(index);
-            if (record == null || Transport.RecordOf(index) != null) { ShowShips(index); return; }
+            if (record == null || Storage.Trading(record) || Transport.RecordOf(index) != null) { ShowShips(index); return; }
             var from = Shipyards.ByName(record.shipyard) ?? info;
             var destinations = new List<KeyValuePair<ShipyardInfo, int>>();
             foreach (var other in Shipyards.Table)

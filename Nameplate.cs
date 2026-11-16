@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Threading;
 using HarmonyLib;
+using Unity.Collections;
 using UnityEngine;
 using UnityEngine.Rendering;
 using Object = UnityEngine.Object;
@@ -554,8 +555,8 @@ namespace ShipwrightAndTransport
             internal Material Material, Letters;
             internal Texture2D Albedo, Normal, LettersTexture;
             internal volatile bool Carved, Failed;
-            // Bottom-up, as Texture2D.SetPixels32 takes them, made on the worker thread.
-            internal Color32[] AlbedoPixels, NormalPixels, LettersPixels;
+            // RGBA bytes bottom-up, as the texture's own data lies (Upload), made on the worker thread.
+            internal byte[] AlbedoBytes, NormalBytes, LettersBytes;
             internal int Width, Height, LettersWidth, LettersHeight;
             internal bool Handed;
             internal float LastUse;
@@ -619,8 +620,9 @@ namespace ShipwrightAndTransport
             var font = Fonts.Find(fontAsset) ?? Fonts.Find("IMMORTAL");
             int w = style.CanvasWidth, h = style.CanvasHeight;
             int px = style.BasePixels;
+            reusedAt = Time.unscaledTime;
             // The name's render is read back here (it needs the main thread); turned into the mask on the worker.
-            Color32[] rendered = font ? NameMask(font, name, style, size, out px) : null;
+            byte[] rendered = font ? NameMask(font, name, style, size, Reused, out px) : null;
             // The ornaments are at canvas size (the bundle's check), cached and only read here.
             var ornaments = PlateBundle.Ornaments(style);
             bool letters = face.Letters;
@@ -628,38 +630,104 @@ namespace ShipwrightAndTransport
             face.Width = w;
             face.Height = h;
             if (letters) { face.LettersWidth = style.LettersRect[2]; face.LettersHeight = style.LettersRect[3]; }
-            ThreadPool.QueueUserWorkItem(_ =>
+            QueueCarve(_ =>
             {
                 try
                 {
-                    byte[] mask = rendered != null ? MaskOf(rendered, w, h) : new byte[w * h];
-                    // The brass letters are the name alone, cut out before the ornaments join the mask.
-                    if (letters) face.LettersPixels = Pixels(Carving.Letters(mask, w, h, style.LettersRect), face.LettersWidth, face.LettersHeight);
-                    if (ornaments != null)
-                        for (int i = 0; i < mask.Length; i++)
-                            if (ornaments[i] > mask[i]) mask[i] = ornaments[i];
-                    Carving.Carve(woodRgba, mask, w, h, sigma, out byte[] albedo, out byte[] normal);
-                    face.AlbedoPixels = Pixels(albedo, w, h);
-                    face.NormalPixels = Pixels(normal, w, h);
+                    CarveFace(rendered, woodRgba, ornaments, w, h, sigma, letters ? style.LettersRect : null, Reused, out byte[] albedo, out byte[] normal, out byte[] lettersBytes);
+                    face.LettersBytes = lettersBytes;
+                    face.AlbedoBytes = albedo;
+                    face.NormalBytes = normal;
                 }
                 catch (Exception e) { face.Failed = true; Log.Error("Plates: carving failed: " + e); }
                 face.Carved = true;
             });
         }
 
-        // Every frame: uploads finished faces and hands them out; now and then lets unused faces go.
+        // Steps 3-7 and 11 of §9.5 for one face, on the worker thread (and in the host tests): the name's render (bottom-up RGBA, as
+        // read back; null for none) made the mask, the brass letters cut from the name alone (lettersRect, null for none) before the
+        // ornaments join the mask, then the carving; each output bottom-up, as the texture takes it (Upload). With a pool, every array
+        // comes from it, and may be longer than this face needs (only its first width x height pixels, or the letters' rectangle, are
+        // the face's; Upload copies just those), and the render and the mask go back to it; without, new arrays of the face's size.
+        internal static void CarveFace(byte[] rendered, byte[] wood, byte[] ornaments, int w, int h, float sigma, int[] lettersRect, Carving.Pool pool,
+            out byte[] albedo, out byte[] normal, out byte[] letters)
+        {
+            int count = w * h;
+            byte[] mask = pool != null ? pool.Bytes(count) : new byte[count];
+            if (rendered != null) MaskOf(rendered, w, h, mask);
+            else if (pool != null) Array.Clear(mask, 0, count);
+            if (pool != null) pool.Give(rendered);
+            letters = null;
+            if (lettersRect != null)
+            {
+                int length = lettersRect[2] * lettersRect[3] * 4;
+                letters = BottomUp(Carving.Letters(mask, w, h, lettersRect, pool != null ? pool.Bytes(length) : new byte[length]), lettersRect[2], lettersRect[3]);
+            }
+            if (ornaments != null)
+                for (int i = 0; i < count; i++)
+                    if (ornaments[i] > mask[i]) mask[i] = ornaments[i];
+            albedo = pool != null ? pool.Bytes(count * 4) : new byte[count * 4];
+            normal = pool != null ? pool.Bytes(count * 4) : new byte[count * 4];
+            Carving.Carve(wood, mask, w, h, sigma, albedo, normal, pool);
+            if (pool != null) pool.Give(mask);
+            BottomUp(albedo, w, h);
+            BottomUp(normal, w, h);
+        }
+
+        // The carving's arrays, reused (the performance review's "After the changes", outputs\shipwright_perf_review\REPORT.md; the
+        // user's "Yes, reuse all (B)", 2026-11-15): each carve made about 32 MB of new arrays at the largest plate (the render read
+        // back, the mask, the blur's two buffers, the face's albedo, normal map and letters), and Mono's heap grew by them. A face's
+        // own arrays go back once uploaded (Tick). Let go 30 s after their last use, so nothing is kept for good.
+        private static readonly Carving.Pool Reused = new Carving.Pool();
+        private static float reusedAt;
+
+        // One face carved at a time, on one worker. Each carve holds about 25 MB of canvas-sized arrays while it runs, and a load or a
+        // page with several plates started them all at once: six faces grew the Mono heap by about 150 MB, which Mono never gives back
+        // (the performance review of 2026-11-14, outputs\shipwright_perf_review\REPORT.md, item 2b).
+        private static readonly Queue<WaitCallback> carves = new Queue<WaitCallback>();
+        private static bool carving;
+
+        private static void QueueCarve(WaitCallback carve)
+        {
+            lock (carves)
+            {
+                carves.Enqueue(carve);
+                if (carving) return;
+                carving = true;
+            }
+            ThreadPool.QueueUserWorkItem(CarveInTurn);
+        }
+
+        private static void CarveInTurn(object state)
+        {
+            while (true)
+            {
+                WaitCallback carve;
+                lock (carves)
+                {
+                    if (carves.Count == 0) { carving = false; return; }
+                    carve = carves.Dequeue();
+                }
+                // Each carve catches its own errors; this keeps the queue going should one still escape.
+                try { carve(null); }
+                catch (Exception e) { Log.Error("Plates: a carving failed: " + e); }
+            }
+        }
+
+        // Every frame: uploads a finished face and hands it out, one a frame (each texture's upload and mipmaps take a few ms of the
+        // main thread: six finished faces made one 56 ms frame, REPORT.md item 2c); now and then lets unused faces go.
         internal static void Tick()
         {
             foreach (var face in faces.Values)
             {
                 if (face.Handed || !face.Carved) continue;
                 face.Handed = true;
-                if (!face.Failed && face.AlbedoPixels != null)
+                if (!face.Failed && face.AlbedoBytes != null)
                 {
                     try
                     {
-                        face.Albedo = Upload(face.AlbedoPixels, face.Width, face.Height, false);
-                        face.Normal = Upload(face.NormalPixels, face.Width, face.Height, true);
+                        face.Albedo = Upload(face.AlbedoBytes, face.Width, face.Height, false);
+                        face.Normal = Upload(face.NormalBytes, face.Width, face.Height, true);
                         if (face.Material)
                         {
                             face.Material.SetTexture("_MainTex", face.Albedo);
@@ -667,58 +735,70 @@ namespace ShipwrightAndTransport
                             face.Material.EnableKeyword("_NORMALMAP");
                             face.Material.SetFloat("_BumpScale", 1f);
                         }
-                        if (face.LettersPixels != null && face.Letters)
+                        if (face.LettersBytes != null && face.Letters)
                         {
-                            face.LettersTexture = Upload(face.LettersPixels, face.LettersWidth, face.LettersHeight, false);
+                            face.LettersTexture = Upload(face.LettersBytes, face.LettersWidth, face.LettersHeight, false);
                             face.Letters.SetTexture("_MainTex", face.LettersTexture);
                         }
                     }
                     catch (Exception e) { face.Failed = true; Log.Error("Plates: uploading a face failed: " + e); }
                 }
-                face.AlbedoPixels = face.NormalPixels = face.LettersPixels = null;
+                // Upload copied them into the textures; only this face held them (the worker is done with them once Carved is set).
+                Reused.Give(face.AlbedoBytes);
+                Reused.Give(face.NormalBytes);
+                Reused.Give(face.LettersBytes);
+                reusedAt = Time.unscaledTime;
+                face.AlbedoBytes = face.NormalBytes = face.LettersBytes = null;
                 foreach (var done in face.Then)
                 {
                     try { done(); } catch (Exception e) { Log.Error("Plates: " + e); }
                 }
                 face.Then.Clear();
+                break;
             }
             if (Time.unscaledTime >= nextEviction)
             {
                 nextEviction = Time.unscaledTime + 10f;
                 Evict();
+                // Only the free arrays go (one in use comes back later and waits for the next time): the room stays in Mono's heap
+                // for the game's other uses.
+                if (Time.unscaledTime - reusedAt > 30f) Reused.Clear();
             }
         }
 
-        // Top-down RGBA to pixels, bottom-up: Unity's row 0 is the bottom. Run on the worker thread (Color32 is plain data),
-        // since at 2-5 ms and 2.5-5 MB a texture it was the main thread's share of each new face (the code review,
-        // 2026-10-28, host timings).
-        internal static Color32[] Pixels(byte[] rgba, int width, int height)
+        // Top-down RGBA turned bottom-up in place (Unity's row 0 is the bottom), on the worker thread; the same array is returned.
+        // It was a Color32[] copy of each canvas (the code review, 2026-10-28, moved it to the worker): the bytes now go into the
+        // texture as they are (Upload), with no second and third copy of each face (REPORT.md item 2b).
+        internal static byte[] BottomUp(byte[] rgba, int width, int height)
         {
-            var pixels = new Color32[width * height];
-            for (int y = 0; y < height; y++)
+            int stride = width * 4;
+            var row = new byte[stride];
+            for (int top = 0, bottom = height - 1; top < bottom; top++, bottom--)
             {
-                int source = (height - 1 - y) * width * 4, target = y * width;
-                for (int x = 0; x < width; x++, source += 4)
-                    pixels[target + x] = new Color32(rgba[source], rgba[source + 1], rgba[source + 2], rgba[source + 3]);
+                Buffer.BlockCopy(rgba, top * stride, row, 0, stride);
+                Buffer.BlockCopy(rgba, bottom * stride, rgba, top * stride, stride);
+                Buffer.BlockCopy(row, 0, rgba, bottom * stride, stride);
             }
-            return pixels;
+            return rgba;
         }
 
-        // The name's render, read back bottom-up, as the top-down mask of its red channel (on the worker thread too).
-        internal static byte[] MaskOf(Color32[] pixels, int width, int height)
+        // The name's render, read back bottom-up as RGBA bytes, into mask (at least width x height long) as the top-down mask of its
+        // red channel (on the worker thread too).
+        internal static byte[] MaskOf(byte[] rgba, int width, int height, byte[] mask)
         {
-            var mask = new byte[width * height];
             for (int y = 0; y < height; y++)
                 for (int x = 0; x < width; x++)
-                    mask[(height - 1 - y) * width + x] = pixels[y * width + x].r;
+                    mask[(height - 1 - y) * width + x] = rgba[(y * width + x) * 4];
             return mask;
         }
 
-        // To a texture with mipmaps. Nothing reads it back, so the CPU copy is dropped.
-        private static Texture2D Upload(Color32[] pixels, int width, int height, bool linear)
+        // To a texture with mipmaps: the bottom-up RGBA bytes copied into its top level as they are (SetPixels32 took the same bytes as
+        // Color32), the mipmaps made from it by Apply. Nothing reads it back, so the CPU copy is dropped.
+        private static Texture2D Upload(byte[] rgba, int width, int height, bool linear)
         {
             var texture = new Texture2D(width, height, TextureFormat.RGBA32, true, linear);
-            texture.SetPixels32(pixels);
+            var data = texture.GetRawTextureData<byte>();
+            NativeArray<byte>.Copy(rgba, data, width * height * 4);
             texture.wrapMode = TextureWrapMode.Clamp;
             texture.Apply(true, true);
             return texture;
@@ -803,10 +883,10 @@ namespace ShipwrightAndTransport
         }
 
         // The name in white on black at canvas size, fitted to the text box and centred on its ink, drawn quad by quad
-        // with the font's own material into a render texture, and read back as it lies (bottom-up; MaskOf turns it into the
-        // mask). Requests, measures and draws in one go, since the dynamic font may rebuild its texture when characters are
-        // requested.
-        internal static Color32[] NameMask(Font font, string name, PlateStyle style, int size, out int px)
+        // with the font's own material into a render texture, and read back as it lies (bottom-up RGBA bytes, in an array from pool,
+        // which may be longer; MaskOf turns it into the mask). Requests, measures and draws in one go, since the dynamic font may
+        // rebuild its texture when characters are requested.
+        internal static byte[] NameMask(Font font, string name, PlateStyle style, int size, Carving.Pool pool, out int px)
         {
             int w = style.CanvasWidth, h = style.CanvasHeight;
             px = Carving.SizePixels(style.BasePixels, size);
@@ -846,9 +926,12 @@ namespace ShipwrightAndTransport
                 }
                 GL.End();
                 GL.PopMatrix();
+                // Read into the texture's CPU copy; no Apply, which only sent it back to the video card (REPORT.md item 2c). The copy's
+                // bytes (RGBA32, no mipmaps: w x h x 4) go into a reused array, where GetPixels32 made a new Color32[] each time.
                 read.ReadPixels(new Rect(0, 0, w, h), 0, 0);
-                read.Apply();
-                return read.GetPixels32();
+                var rgba = pool.Bytes(w * h * 4);
+                NativeArray<byte>.Copy(read.GetRawTextureData<byte>(), rgba, w * h * 4);
+                return rgba;
             }
             finally
             {
@@ -948,10 +1031,12 @@ namespace ShipwrightAndTransport
         // The brass letters' texture (SPEC.md §9.5, step 11): the name's mask (canvas size, top-down) cut to the letters'
         // rectangle {x, y, width, height}, as white RGBA whose alpha is the mask; the cutout material shows the brass where
         // the alpha passes its cutoff. Outside the canvas it is clear.
-        internal static byte[] Letters(byte[] mask, int width, int height, int[] rect)
+        internal static byte[] Letters(byte[] mask, int width, int height, int[] rect) => Letters(mask, width, height, rect, new byte[rect[2] * rect[3] * 4]);
+
+        // Into rgba (at least the rectangle's width x height x 4 long; every byte of that part is written).
+        internal static byte[] Letters(byte[] mask, int width, int height, int[] rect, byte[] rgba)
         {
             int rx = rect[0], ry = rect[1], rw = rect[2], rh = rect[3];
-            var rgba = new byte[rw * rh * 4];
             for (int y = 0; y < rh; y++)
             {
                 int sy = ry + y;
@@ -969,10 +1054,19 @@ namespace ShipwrightAndTransport
         // max). Out: the albedo (RGBA, alpha 255) and the normal map (RGBA, alpha 255), top-down.
         internal static void Carve(byte[] wood, byte[] mask, int width, int height, float sigma, out byte[] albedo, out byte[] normal)
         {
+            albedo = new byte[width * height * 4];
+            normal = new byte[width * height * 4];
+            Carve(wood, mask, width, height, sigma, albedo, normal, null);
+        }
+
+        // Into albedo and normal (each at least width x height x 4 long; every byte of that part is written, nothing past it), the
+        // blur's two buffers from pool (null: new ones). A reused buffer is cleared over the part used first: the blur skips rows
+        // without ink and pixels outside the mask, which a new array leaves at 0 and a reused one at the last carve's values (ghost
+        // letters of the previous name).
+        internal static void Carve(byte[] wood, byte[] mask, int width, int height, float sigma, byte[] albedo, byte[] normal, Pool pool)
+        {
             int count = width * height;
-            albedo = new byte[count * 4];
-            normal = new byte[count * 4];
-            Buffer.BlockCopy(wood, 0, albedo, 0, Math.Min(wood.Length, albedo.Length));
+            Buffer.BlockCopy(wood, 0, albedo, 0, Math.Min(wood.Length, count * 4));
             for (int i = 0; i < count; i++)
             {
                 albedo[i * 4 + 3] = 255;
@@ -997,7 +1091,10 @@ namespace ShipwrightAndTransport
             // the same byte for byte (the code review, 2026-10-28: 1.2-2.2 times faster on the three styles; the host test
             // compares it with the full sums): a box row without ink blurs to zeros, a zero tap adds +0, and the vertical sum
             // is needed only where the mask is inked, since the depth is the mask times it.
-            var horizontal = new float[bw * bh];
+            int box = bw * bh;
+            var horizontal = pool != null ? pool.Floats(box) : new float[box];
+            var depth = pool != null ? pool.Floats(box) : new float[box];
+            if (pool != null) { Array.Clear(horizontal, 0, box); Array.Clear(depth, 0, box); }
             for (int y = 0; y < bh; y++)
             {
                 int row = (y0 + y) * width;
@@ -1018,7 +1115,6 @@ namespace ShipwrightAndTransport
                     horizontal[y * bw + x] = sum;
                 }
             }
-            var depth = new float[bw * bh];
             for (int y = 0; y < bh; y++)
                 for (int x = 0; x < bw; x++)
                 {
@@ -1044,6 +1140,50 @@ namespace ShipwrightAndTransport
                     if (left != 0f || right != 0f || up != 0f || down != 0f)
                         Normal(left, right, up, down, out normal[i], out normal[i + 1], out normal[i + 2]);
                 }
+            // Given back only here, after their last use (on an error they are simply not reused).
+            if (pool != null) { pool.Give(horizontal); pool.Give(depth); }
+        }
+
+        // Reused arrays (PlateFaces.Reused): rented by length, the shortest free one at least that long (so it may be longer than
+        // asked for: every user stops at its own canvas's size), given back when its last user is done. At most a few free arrays
+        // of each kind are kept, the shortest let go first; an array given back twice is kept once, so two carves never share one.
+        // Any thread (the worker rents and gives back, the main thread too): one lock.
+        internal sealed class Pool
+        {
+            private const int MaxFreeBytes = 6, MaxFreeFloats = 2;
+            private readonly object gate = new object();
+            private readonly List<byte[]> bytes = new List<byte[]>();
+            private readonly List<float[]> floats = new List<float[]>();
+
+            internal byte[] Bytes(int length) { lock (gate) return Take(bytes, length) ?? new byte[length]; }
+            internal float[] Floats(int length) { lock (gate) return Take(floats, length) ?? new float[length]; }
+            internal void Give(byte[] array) { if (array != null) lock (gate) Keep(bytes, array, MaxFreeBytes); }
+            internal void Give(float[] array) { if (array != null) lock (gate) Keep(floats, array, MaxFreeFloats); }
+            internal int Free { get { lock (gate) return bytes.Count + floats.Count; } }
+            internal void Clear() { lock (gate) { bytes.Clear(); floats.Clear(); } }
+
+            private static T[] Take<T>(List<T[]> free, int length)
+            {
+                int best = -1;
+                for (int i = 0; i < free.Count; i++)
+                    if (free[i].Length >= length && (best < 0 || free[i].Length < free[best].Length)) best = i;
+                if (best < 0) return null;
+                var array = free[best];
+                free.RemoveAt(best);
+                return array;
+            }
+
+            private static void Keep<T>(List<T[]> free, T[] array, int max)
+            {
+                foreach (var kept in free) if (ReferenceEquals(kept, array)) return;
+                free.Add(array);
+                while (free.Count > max)
+                {
+                    int shortest = 0;
+                    for (int i = 1; i < free.Count; i++) if (free[i].Length < free[shortest].Length) shortest = i;
+                    free.RemoveAt(shortest);
+                }
+            }
         }
     }
 

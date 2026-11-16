@@ -28,7 +28,7 @@ namespace ShipwrightAndTransport
     [BepInIncompatibility(StorageGuid)]
     public sealed class Plugin : BaseUnityPlugin
     {
-        public const string Guid = "DogEggz.ShipwrightTransport", PluginName = "Shipwright and Transport", Version = "0.2.0";
+        public const string Guid = "DogEggz.ShipwrightTransport", PluginName = "Shipwright and Transport", Version = "0.2.1";
         internal const string StorageGuid = "DogEggz.ShipwrightandStorage";
 
         internal static Plugin Instance;
@@ -85,6 +85,8 @@ namespace ShipwrightAndTransport
             if (State.Off || !GameState.playing || GameState.currentlyLoading) return;
             Step(Parking.Tick);
             Step(() => Transport.Tick());
+            Step(Wharves.Tick);
+            Step(FleetKeeping.Tick);
             Step(Sailing.Voyages.Update);
             Step(() => Orders.Tick());
             Step(DropAreas.Tick);
@@ -627,6 +629,13 @@ namespace ShipwrightAndTransport
         // A stored ship's daily fee in units: the ship's (the shipyard fee) and its cargo's share (CargoDailyPercent).
         internal static int StorageUnits(int shipUnits, int cargoUnits) => shipUnits + CargoDailyUnits(cargoUnits);
 
+        // No storage fee at a trade office's wharf (SPEC.md §5.12; the user, 2026-11-16: "Storage fee, cleaning and repair in shipyard
+        // is free in office wharf"; EconomyOverhaul makes the cleaning and repair free there itself). By the yard a ship is stored at,
+        // so it holds while the wharf is lost and not yet emptied (Wharves.MoveOut starts the paid days at the main yard).
+        internal static bool FreeStorage(ShipyardInfo info) => info != null && info.Wharf;
+
+        internal static bool FreeStorage(string shipyard) => FreeStorage(Shipyards.ByName(shipyard));
+
         // Midnights passed: storing and collecting on the same day is free (decision 30).
         internal static int StorageDays(int today, int dayStored) => Math.Max(0, today - dayStored);
 
@@ -822,10 +831,14 @@ namespace ShipwrightAndTransport
         internal readonly int Currency;       // Shipyard.region: 0 Lions, 1 Dragons, 2 Crowns
         internal readonly int[] Builds;       // the hulls it builds, by save index (decision 10)
         internal readonly bool OldChronian;   // exists only with Old Chronian (decision 31)
+        // A trade office's wharf (EconomyOverhaul's; SPEC.md §5.12): the shipyard of its region that takes its ships when the wharf is
+        // lost (the user, 2026-11-14: "Moved to the main shipyard"). Null for every other shipyard.
+        internal readonly string Main;
+        internal bool Wharf => Main != null;
 
-        internal ShipyardInfo(string name, int currency, int[] builds, bool oldChronian)
+        internal ShipyardInfo(string name, int currency, int[] builds, bool oldChronian, string main = null)
         {
-            Name = name; Currency = currency; Builds = builds; OldChronian = oldChronian;
+            Name = name; Currency = currency; Builds = builds; OldChronian = oldChronian; Main = main;
         }
     }
 
@@ -839,6 +852,13 @@ namespace ShipwrightAndTransport
             new ShipyardInfo("Kicia Bay", 1, new[] { 70 }, false),
             // Old Chronian's FORT shipyard: storage and transport only (decision 16).
             new ShipyardInfo("Chronos", 2, new int[0], true),
+            // EconomyOverhaul's trade office wharves (SPEC.md §5.12): storage and transport on paper only (the user's Q29: "Only paper
+            // transport and storage."), each present only while its wharf stands (Wharves). Named by its port, paid in its region's
+            // coin as its yard charges (Shipyard.region), with its region's shipyard for when it is lost. Always in the table, so a
+            // ship's record that names one is still read when the wharf is gone.
+            new ShipyardInfo("Oasis", 0, new int[0], false, "Gold Rock City"),
+            new ShipyardInfo("Serpent Isle", 1, new int[0], false, "Dragon Cliffs"),
+            new ShipyardInfo("Firefly Grotto", 2, new int[0], false, "Fort Aestrin"),
         };
 
         internal static ShipyardInfo ByName(string name)
@@ -848,7 +868,8 @@ namespace ShipwrightAndTransport
             return null;
         }
 
-        internal static bool Present(ShipyardInfo info) => !info.OldChronian || Compat.Mods.OldChronian;
+        // In the game now: Chronos only with Old Chronian, a trade office's wharf only while it stands (asked again as play goes on).
+        internal static bool Present(ShipyardInfo info) => info.Wharf ? Wharves.Stands(info) : !info.OldChronian || Compat.Mods.OldChronian;
 
         // The shipyards on the islands loaded now; they load and unload with their islands.
         internal static Shipyard[] Loaded() => UnityEngine.Object.FindObjectsOfType<Shipyard>();
@@ -883,7 +904,13 @@ namespace ShipwrightAndTransport
             if (!yard) return null;
             int id = yard.GetInstanceID();
             if (known.TryGetValue(id, out var info)) return info;
+            // A trade office's wharf is known by its own documents, from EconomyOverhaul, never by the nearest port. Remembered as the
+            // others are: EconomyOverhaul makes a new yard object each time and destroys it when the wharf, its clerk or its island goes.
+            info = Wharves.InfoOf(yard);
+            if (info != null) { known[id] = info; return info; }
             info = ByName(PortOf(yard));
+            // Any other shipyard near a wharf's port is a mod's and isn't served (the game has none there).
+            if (info != null && info.Wharf) info = null;
             if (info != null && !info.OldChronian && IsModded(yard.transform))
             {
                 Log.Info("Shipyard '" + yard.name + "' near " + info.Name + " was added by a mod; only the game's own shipyard there is served.");
@@ -922,6 +949,173 @@ namespace ShipwrightAndTransport
             var boats = yard && boatsInTrigger != null ? boatsInTrigger(yard) : null;
             return boats ?? new List<GameObject>();
         }
+    }
+
+    // ==== Wharves ====
+
+    // EconomyOverhaul's trade office wharves (SPEC.md §5.12; that mod's WHARF_DRAFT.md): a pier with a shipyard it makes at three of
+    // the player's houses, at Oasis, Serpent Isle and Firefly Grotto. Shipwright stores and transports there, on paper only (the
+    // user's Q29: "Only paper transport and storage."); Shipyards.Table holds each as a shipyard that builds nothing. A wharf is
+    // bought during play and can be lost again (a bankruptcy, a lender takes the house, "Prepare to uninstall"), and its yard is made
+    // a while after its island loads and goes while no clerk works there, so what stands is asked of that mod's OfficeWharfApi again
+    // when it matters, never kept from the game's start: when a shipyard board opens (its pages are the only place wharves show), when
+    // a yard is met the first time (Shipyards.InfoOf), at the status key, and once a minute for a lost wharf's ships (the user,
+    // 2026-11-14, of a read once a second: "that too many"). Without that mod, or with one from before its wharves, none stands.
+    internal static class Wharves
+    {
+        internal sealed class Stood { internal ShipyardInfo Info; internal int House; }
+
+        private const float CheckEvery = 60f, TickGap = 5f;
+        private static readonly List<Stood> standing = new List<Stood>();
+        private static readonly HashSet<string> notKnown = new HashSet<string>();
+
+        // The standing wharves Shipwright knows, from EconomyOverhaul's houses and each one's port name: a wharf is known by its
+        // port (the table's wharf entries), so no house number is kept here. One at a port not in the table is left out and named.
+        internal static List<Stood> Match(int[] houses, Func<int, string> portName, Action<int, string> unknown = null)
+        {
+            var list = new List<Stood>();
+            if (houses == null) return list;
+            foreach (int house in houses)
+            {
+                string name = portName(house);
+                var info = Shipyards.ByName(name);
+                if (info == null || !info.Wharf) { unknown?.Invoke(house, name); continue; }
+                if (!list.Exists(s => s.Info == info)) list.Add(new Stood { Info = info, House = house });
+            }
+            return list;
+        }
+
+        // Asks EconomyOverhaul which wharves stand now: its Standing() and each one's Port(house).
+        internal static void Refresh()
+        {
+            standing.Clear();
+            standing.AddRange(Match(Compat.EconomyOverhaul.WharfHouses(), PortName, (house, name) =>
+            {
+                if (notKnown.Add(house + " " + name))
+                    Log.Warn("EconomyOverhaul has a wharf at house " + house + " (" + (name ?? "no port") + "), which Shipwright doesn't know; it isn't served.");
+            }));
+        }
+
+        private static string PortName(int house)
+        {
+            int index = Compat.EconomyOverhaul.WharfPort(house);
+            var ports = Port.ports;
+            var port = index >= 0 && ports != null && index < ports.Length ? ports[index] : null;
+            return port ? port.GetPortName() : null;
+        }
+
+        // As last read (Refresh).
+        internal static bool Stands(ShipyardInfo info)
+        {
+            foreach (var wharf in standing)
+                if (wharf.Info == info) return true;
+            return false;
+        }
+
+        // The wharf whose yard this is: the shipyard of its documents, which EconomyOverhaul gives (null until the island's scene has
+        // loaded, and while no clerk works there). Asked once per yard object (Shipyards.InfoOf remembers it), read afresh.
+        internal static ShipyardInfo InfoOf(Shipyard yard)
+        {
+            Refresh();
+            foreach (var wharf in standing)
+            {
+                var documents = Compat.EconomyOverhaul.WharfDocuments(wharf.House);
+                var paper = documents ? documents.GetComponent<ShipyardDocuments>() : null;
+                if (paper && paper.shipyard == yard) return wharf.Info;
+            }
+            return null;
+        }
+
+        // ---- A wharf lost ----
+
+        // The user (2026-11-14), asked what happens to the ships stored at a lost wharf or on their way to it: "Moved to the main
+        // shipyard" (free, with a notice: Oasis to Gold Rock City, Serpent Isle to Dragon Cliffs, Firefly Grotto to Fort Aestrin).
+        // EconomyOverhaul's answer reads "no wharf" too while it loads a save or prepares a new game, so a wharf counts as lost only
+        // when two of these checks (CheckEvery apart) find it missing, at least LostAfterSeconds apart, with play going on between
+        // them (Claude's numbers); a load, the menu or any other pause in the frames starts the count again.
+        internal static float LostAfterSeconds = 30f;
+        private static readonly Dictionary<string, float> missingSince = new Dictionary<string, float>();
+        private static float nextCheck, lastTick;
+
+        internal static void Tick()
+        {
+            float now = Time.unscaledTime;
+            if (now - lastTick > TickGap) missingSince.Clear();
+            lastTick = now;
+            if (now < nextCheck) return;
+            nextCheck = now + CheckEvery;
+            Refresh();
+            double hours = GameClock.Hours;
+            foreach (var info in Shipyards.Table)
+            {
+                if (!info.Wharf) continue;
+                if (Stands(info) || !Holds(State.Save, info.Name, hours)) { missingSince.Remove(info.Name); continue; }
+                if (!missingSince.TryGetValue(info.Name, out float since))
+                {
+                    missingSince[info.Name] = now;
+                    Log.Info("The wharf at " + info.Name + " isn't standing and ships are stored there or bound for it: they go to " + info.Main + " if it is still gone at the next check (" + CheckEvery.ToString("0") + " s).");
+                    continue;
+                }
+                if (now - since < LostAfterSeconds) continue;
+                missingSince.Remove(info.Name);
+                var moved = MoveOut(State.Save, info.Name, info.Main, hours);
+                if (moved.Count == 0) continue;
+                var names = moved.ConvertAll(Ships.NameOf);
+                Log.Info("The wharf at " + info.Name + " is gone: " + string.Join(", ", names.ToArray()) + " moved to " + info.Main + " (stored there, or bound there now), nothing charged.");
+                Notify.Later(Moved(names[0], moved.Count, info.Name, info.Main));
+                if (Board.IsOpen) Board.Instance.Refresh();
+            }
+        }
+
+        // A stored ship or a booking that names the wharf: what MoveOut would change.
+        internal static bool Holds(ShipwrightSave save, string wharf, double hours)
+        {
+            foreach (var record in save.stored)
+                if (record.shipyard == wharf) return true;
+            foreach (var transport in save.transports)
+                if (transport.to == wharf || WaitsAt(transport, wharf, hours)) return true;
+            return false;
+        }
+
+        // A transport (not a tow: its `from` is the tug's shipyard) booked from the wharf, its ship still there finding sailors.
+        private static bool WaitsAt(TransportRecord transport, string wharf, double hours) =>
+            !transport.tow && transport.from == wharf && hours < transport.departHour;
+
+        // The lost wharf's ships to its region's shipyard, as records only (a stored ship lies on the parking field wherever its
+        // shipyard is). Stored there: stored at the main shipyard from the day of the move, as the days at the wharf were free
+        // (Fees.FreeStorage; a day already later, a booking's, is kept). Bound for it, a transport or a tow: bound for the main
+        // shipyard, at the same hour. Waiting there for sailors: waiting at the main shipyard; if that is where it was going, the
+        // booking is done and it is stored there from the departure day (no fee is paid back, as a booking can't be cancelled).
+        // Gives the ships' save indices.
+        internal static List<int> MoveOut(ShipwrightSave save, string wharf, string main, double hours)
+        {
+            var moved = new List<int>();
+            int today = GameClock.DayOf(hours);
+            foreach (var record in save.stored)
+                if (record.shipyard == wharf)
+                {
+                    record.shipyard = main;
+                    record.dayStored = Math.Max(record.dayStored, today);
+                    moved.Add(record.saveIndex);
+                }
+            foreach (var transport in save.transports.ToArray())
+            {
+                bool waited = WaitsAt(transport, wharf, hours);
+                if (transport.to != wharf && !waited) continue;
+                if (transport.to == wharf) transport.to = main;
+                if (waited) transport.from = main;
+                if (!moved.Contains(transport.saveIndex)) moved.Add(transport.saveIndex);
+                if (transport.tow || transport.from != transport.to || hours >= transport.departHour) continue;
+                save.transports.Remove(transport);
+                var stored = save.stored.Find(s => s.saveIndex == transport.saveIndex);
+                if (stored != null) stored.dayStored = GameClock.DayOf(transport.departHour);
+            }
+            return moved;
+        }
+
+        // The scroll's three lines of 29 letters: one ship by her name (16 letters at most), more by their number.
+        internal static string Moved(string ship, int count, string wharf, string main) =>
+            (count == 1 ? ship : count + " ships") + " moved from\n" + wharf + " to\n" + main + " shipyard.";
     }
 
     // ==== Ships ====
@@ -1072,6 +1266,8 @@ namespace ShipwrightAndTransport
             for (int i = 0; i < groups.Length; i++) groups[i] = new List<KeyValuePair<OwnedShip, ShipFacts>>();
             foreach (var ship in Owned())
             {
+                // An original trading in the fleet isn't listed (the user, 2026-11-14: "Can we just hide the original copy in storage UI").
+                if (Storage.Trading(Storage.RecordOf(ship.Index))) continue;
                 var facts = Facts(ship, here);
                 var where = Whereabouts.Decide(facts, shipyard);
                 int group = where == Where.StoredHere || where == Where.LeavingHere ? 0
@@ -1306,6 +1502,8 @@ namespace ShipwrightAndTransport
                 for (int i = 0; i < 4; i++) text.Append(' ').Append(Money.Short[i]).Append(' ').Append(Money.Rate(i).ToString("0.####", Invariant));
                 text.AppendLine();
                 var rented = new List<PurchasableBoat>();
+                Wharves.Refresh();
+                FleetKeeping.Check();
                 var ships = Ships.Owned(rented);
                 WriteShipyards(text, ships);
                 WriteShips(text, ships, rented);
@@ -1321,7 +1519,7 @@ namespace ShipwrightAndTransport
             foreach (var info in Shipyards.Table)
             {
                 text.Append("  shipyard ").Append(info.Name).Append(", ").Append(Money.Names[info.Currency]);
-                if (!Shipyards.Present(info)) { text.AppendLine(": needs Old Chronian, not installed"); continue; }
+                if (!Shipyards.Present(info)) { text.AppendLine(info.Wharf ? ": a trade office's wharf (EconomyOverhaul), not standing" : ": needs Old Chronian, not installed"); continue; }
                 Shipyard live = null;
                 foreach (var yard in loaded)
                     if (Shipyards.InfoOf(yard) == info) { live = yard; break; }
@@ -1355,9 +1553,13 @@ namespace ShipwrightAndTransport
                 if (Compat.EconomyOverhaul.IsPledged(ship.Index)) text.Append(", pledged for a bottomry loan");
                 // Her cargo: as recorded at the store, or what is aboard her now.
                 var record = Storage.RecordOf(ship.Index);
+                if (Storage.Trading(record))
+                    text.Append(", trading in EconomyOverhaul's fleet as trader ").Append(record.fleetTrader).Append(" (kept stored, off the ship list; its fleet reads ")
+                        .Append(Compat.EconomyOverhaul.FleetKept(ship.Index)).Append(')');
                 int cargo = record != null ? record.cargoUnits : Storage.CargoValue(ship.Index);
                 int units = record != null ? Fees.StorageUnits(record.feeUnits, cargo) : Fees.StorageUnits(Fees.DailyUnits(ship.Price), cargo);
                 text.Append("; cargo worth ").Append(cargo).Append(" units");
+                if (record != null && Fees.FreeStorage(record.shipyard)) { text.AppendLine("; storage free at " + record.shipyard + "'s wharf (" + units + " units a day elsewhere)"); continue; }
                 text.Append("; storage ").Append(units).Append(" units a day = ");
                 for (int i = 0; i < 3; i++)
                     text.Append(i > 0 ? ", " : "").Append(Fees.Coins(units, Money.Rate(i))).Append(' ').Append(Money.Short[i]);
@@ -1455,6 +1657,9 @@ namespace ShipwrightAndTransport
         public int feeUnits;
         public int cargoUnits;
         public float massLb, cargoLb;
+        // An original trading in EconomyOverhaul's fleet (FLEET_ORIGINALS_DRAFT.md; the user, 2026-11-14): its trader id while it
+        // stays stored, hidden and off the ship list (FleetKeeping); 0: not trading. A record from before it reads 0.
+        public int fleetTrader;
     }
 
     // A booked transport (§6). The storage record stays at the origin until she arrives. orderedAt: the shipyard that booked
@@ -1733,6 +1938,8 @@ namespace ShipwrightAndTransport
             Run("transport arrivals", () => Transport.Tick(true));
             Run("order completions", () => Orders.Tick(true));
             Run("sailing voyages", Sailing.Voyages.AfterLoad);
+            // Originals trading in the fleet: freed if EconomyOverhaul is gone; if its world isn't loaded yet, the next read decides.
+            Run("trade fleet originals", FleetKeeping.Check);
             if (Log.Verbose) Run("crate check", () => Plugin.Instance.StartCoroutine(Storage.LogCratesAfterLoad()));
         }
 
@@ -2174,6 +2381,10 @@ namespace ShipwrightAndTransport
         {
             if (State.Off) { Notify.Show("Shipwright is off\nfor this save."); return; }
             var yard = documents ? documents.shipyard : null;
+            // Which trade office wharves stand, read once as the board opens: its pages list them (Shipyards.Present).
+            Wharves.Refresh();
+            // Originals whose trader left the fleet come back on the list before it is drawn (FleetKeeping).
+            FleetKeeping.Check();
             var info = Shipyards.InfoOf(yard);
             if (info == null || !Shipyards.Present(info) || IsOpen) return;
             if (parts == null || !parts.Alive)
@@ -3024,9 +3235,75 @@ namespace ShipwrightAndTransport.Compat
         internal static bool Installed(string guid) => Chainloader.PluginInfos.ContainsKey(guid);
         internal static bool OldChronian => Installed(OldChronianGuid);
 
+        // Other mods' types by full name, each found once a session. AccessTools.TypeByName walks every type of every loaded assembly
+        // on each call: 7-23 ms with the user's 80 mods (183 assemblies), and the same names were asked for at each of the eight
+        // templates, at each copy built and on the first frame of play (the performance review of 2026-11-14,
+        // outputs\shipwright_perf_review\REPORT.md, item 1). First the assembly named as the type's first namespace part (a mod's types
+        // live in its own DLL: "EconomyOverhaul.Rentals" in EconomyOverhaul), then one index of every loaded type, made on the first
+        // name not found that way. A name not found is looked for again only once another assembly that could hold a mod's types has
+        // loaded (an assembly a mod loads late), counted as it loads (AssemblyLoad). HarmonyX's patched methods don't count: on the
+        // game's Mono, MonoMod writes each as a real assembly named "DMDASM.<hash>.Cecil", not a dynamic one (746 by the start menu
+        // with the user's mods, measured 2026-11-15, outputs\shipwright_perf_review\runs\menu-with-20261115-001911). Counted, they sent
+        // a missing name through the whole index again after any mod's patch: 43 ms, where TypeByName's miss took about 20.
+        private static readonly Dictionary<string, Type> types = new Dictionary<string, Type>();
+        private static Dictionary<string, Assembly> assemblies;
+        private static Dictionary<string, Type> allTypes;
+        private static int loads, loadsSeen = -1;
+
+        static Mods()
+        {
+            AppDomain.CurrentDomain.AssemblyLoad += (sender, e) =>
+            {
+                // Any thread may load an assembly; an error here would fail that load, so none escapes (a name that can't be read counts).
+                try { if (MayHoldModTypes(e.LoadedAssembly.IsDynamic, e.LoadedAssembly.GetName().Name)) System.Threading.Interlocked.Increment(ref loads); }
+                catch (Exception) { System.Threading.Interlocked.Increment(ref loads); }
+            };
+        }
+
+        internal static bool MayHoldModTypes(bool dynamic, string name) => !dynamic && (name == null || !name.StartsWith("DMDASM.", StringComparison.Ordinal));
+
+        internal static Type TypeNamed(string fullName)
+        {
+            if (string.IsNullOrEmpty(fullName)) return null;
+            bool cached = types.TryGetValue(fullName, out var known);
+            if (cached && known != null) return known;
+            int count = System.Threading.Volatile.Read(ref loads);
+            if (cached && count == loadsSeen) return null;
+            if (count != loadsSeen)
+            {
+                loadsSeen = count;
+                allTypes = null;
+                assemblies = new Dictionary<string, Assembly>();
+                foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    string name = assembly.GetName().Name;
+                    if (!assemblies.ContainsKey(name)) assemblies[name] = assembly;
+                }
+            }
+            Type found = null;
+            int dot = fullName.IndexOf('.');
+            if (dot > 0 && assemblies.TryGetValue(fullName.Substring(0, dot), out var own))
+            {
+                try { found = own.GetType(fullName, false); }
+                catch (Exception) { found = null; }
+            }
+            if (found == null)
+            {
+                if (allTypes == null)
+                {
+                    allTypes = new Dictionary<string, Type>();
+                    foreach (var type in AccessTools.AllTypes())
+                        if (type != null && type.FullName != null && !allTypes.ContainsKey(type.FullName)) allTypes[type.FullName] = type;
+                }
+                allTypes.TryGetValue(fullName, out found);
+            }
+            types[fullName] = found;
+            return found;
+        }
+
         internal static Func<int, bool> StaticBool(string typeName, string methodName)
         {
-            var type = AccessTools.TypeByName(typeName);
+            var type = TypeNamed(typeName);
             var method = type != null ? AccessTools.Method(type, methodName, new[] { typeof(int) }) : null;
             if (method == null || !method.IsStatic || method.ReturnType != typeof(bool)) return null;
             return (Func<int, bool>)Delegate.CreateDelegate(typeof(Func<int, bool>), method);
@@ -3067,6 +3344,37 @@ namespace ShipwrightAndTransport.Compat
         private static Func<int, int, string> fleetRefusal;
         private static Func<GameObject, string> fleetRig;
         private static Func<int, int, string, string, int> fleetAdd;
+        private static Func<GameObject, string> fleetSailRefusal;
+        private static Func<int, int, string, string, int, int> fleetAddKept;
+        private static Func<int, int> fleetKept;
+        private static Func<int[]> wharfHouses;
+        private static Func<int, int> wharfPort;
+        private static Func<int, GameObject> wharfDocuments;
+
+        // The trade office's wharves (SPEC.md §5.12; EconomyOverhaul's WHARF_DRAFT.md §8.8): its public OfficeWharfApi, read by name
+        // as OfficeFleetApi is. Standing: the houses whose wharf stands now. Port: a standing wharf's port index, -1 for none.
+        // Documents: its yard's documents object, null until its island's scene has loaded and while no clerk works there. An
+        // EconomyOverhaul from before its wharves (1.2.0 and older) has no such type: no wharf stands. Asked often (Wharves), so
+        // these make no closure.
+        private static bool WharvesKnown => wharfHouses != null && wharfPort != null && wharfDocuments != null;
+        internal static int[] WharfHouses()
+        {
+            Resolve();
+            if (!WharvesKnown) return null;
+            try { return wharfHouses(); } catch (Exception e) { Failed(e); return null; }
+        }
+        internal static int WharfPort(int house)
+        {
+            Resolve();
+            if (!WharvesKnown) return -1;
+            try { return wharfPort(house); } catch (Exception e) { Failed(e); return -1; }
+        }
+        internal static GameObject WharfDocuments(int house)
+        {
+            Resolve();
+            if (!WharvesKnown) return null;
+            try { return wharfDocuments(house); } catch (Exception e) { Failed(e); return null; }
+        }
 
         internal static bool IsRented(int saveIndex) { Resolve(); return Ask(isRented, saveIndex); }
         internal static bool IsPledged(int saveIndex) { Resolve(); return Ask(isPledged, saveIndex); }
@@ -3080,6 +3388,16 @@ namespace ShipwrightAndTransport.Compat
         internal static string FleetRefusal(int region, int hull) { Resolve(); return fleetRefusal == null ? "Not available" : Ask(() => fleetRefusal(region, hull), "Not available"); }
         internal static string FleetRig(GameObject boat) { Resolve(); return fleetRig == null ? null : Ask(() => fleetRig(boat), null); }
         internal static int FleetAdd(int region, int hull, string name, string rig) { Resolve(); return fleetAdd == null ? -1 : Ask(() => fleetAdd(region, hull, name, rig), -1); }
+        // SailRefusal (EconomyOverhaul from 2026-11-09; an older one lacks it, and its Add then takes any sail): why the parked ship's sails keep
+        // it out of the fleet (sails a trader can't draw, MoreSailwindSails' Fisherman sails), already in the scroll's two lines, else null.
+        internal static string FleetSailRefusal(GameObject boat) { Resolve(); return fleetSailRefusal == null ? null : Ask(() => fleetSailRefusal(boat), null); }
+        // Originals in the fleet (FLEET_ORIGINALS_DRAFT.md; EconomyOverhaul from its build with them): AddKept adds a fleet ship that keeps
+        // the original's save index (its trader id, or -1); Kept reads 1 while a fleet ship keeps that original, 0 when none does, -1
+        // while that mod's world isn't loaded. Without EconomyOverhaul, or with one that lacks them, no fleet keeps an original: 0, so a
+        // ship marked trading is freed (the user's "Yes, build it" of that reading). A call that throws gives -1: nothing is freed on it.
+        internal static bool KeptKnown { get { Resolve(); return FleetKnownResolved && fleetAddKept != null && fleetKept != null; } }
+        internal static int FleetAddKept(int region, int hull, string name, string rig, int saveIndex) { Resolve(); return fleetAddKept == null ? -1 : Ask(() => fleetAddKept(region, hull, name, rig, saveIndex), -1); }
+        internal static int FleetKept(int saveIndex) { Resolve(); return fleetKept == null ? 0 : Ask(() => fleetKept(saveIndex), -1); }
 
         private static void Resolve()
         {
@@ -3089,17 +3407,26 @@ namespace ShipwrightAndTransport.Compat
             isRented = Mods.StaticBool("EconomyOverhaul.Rentals", "IsIndex");
             isPledged = Mods.StaticBool("EconomyOverhaul.Bottomry", "Pledged");
             isFinanced = Mods.StaticBool("EconomyOverhaul.Loans", "Financed");
-            seized = SeizedQuery(AccessTools.TypeByName("EconomyOverhaul.Bottomry"));
-            showSale = ShowSaleAction(AccessTools.TypeByName("EconomyOverhaul.Pledges"));
-            var fleet = AccessTools.TypeByName("EconomyOverhaul.OfficeFleetApi");
+            seized = SeizedQuery(Mods.TypeNamed("EconomyOverhaul.Bottomry"));
+            showSale = ShowSaleAction(Mods.TypeNamed("EconomyOverhaul.Pledges"));
+            var fleet = Mods.TypeNamed("EconomyOverhaul.OfficeFleetApi");
             fleetRefusal = Mods.Static<Func<int, int, string>>(fleet, "Refusal", typeof(int), typeof(int));
             fleetRig = Mods.Static<Func<GameObject, string>>(fleet, "RigOf", typeof(GameObject));
             fleetAdd = Mods.Static<Func<int, int, string, string, int>>(fleet, "Add", typeof(int), typeof(int), typeof(string), typeof(string));
+            fleetSailRefusal = Mods.Static<Func<GameObject, string>>(fleet, "SailRefusal", typeof(GameObject));
+            fleetAddKept = Mods.Static<Func<int, int, string, string, int, int>>(fleet, "AddKept", typeof(int), typeof(int), typeof(string), typeof(string), typeof(int));
+            fleetKept = Mods.Static<Func<int, int>>(fleet, "Kept", typeof(int));
+            var wharf = Mods.TypeNamed("EconomyOverhaul.OfficeWharfApi");
+            wharfHouses = Mods.Static<Func<int[]>>(wharf, "Standing");
+            wharfPort = Mods.Static<Func<int, int>>(wharf, "Port", typeof(int));
+            wharfDocuments = Mods.Static<Func<int, GameObject>>(wharf, "Documents", typeof(int));
             Log.Info("EconomyOverhaul found. Rented ships: " + (isRented != null ? "recognised" : "NOT recognised, so they count as owned") +
                 ". Bottomry pledges: " + (isPledged != null ? "recognised" : "NOT recognised") +
                 ". Seized ships: " + (seized != null && showSale != null ? "recognised" : "NOT recognised, so a copy it seized is yours again after a load") +
                 ". Financed cargo: " + (isFinanced != null ? "recognised" : "NOT recognised, so a sale can't refuse it and its loan stays open") +
-                ". Trade fleet: " + (FleetKnownResolved ? "recognised" : "NOT recognised, so no Add to trade fleet button") + ".");
+                ". Trade fleet: " + (FleetKnownResolved ? "recognised" : "NOT recognised, so no Add to trade fleet button") +
+                ". Originals in the fleet: " + (FleetKnownResolved && fleetAddKept != null && fleetKept != null ? "recognised" : "NOT recognised, so only copies join") +
+                ". Office wharves: " + (WharvesKnown ? "recognised" : "NOT recognised (an EconomyOverhaul from before its wharves), so none is served") + ".");
         }
 
         private static bool FleetKnownResolved => fleetRefusal != null && fleetRig != null && fleetAdd != null;
@@ -3153,11 +3480,14 @@ namespace ShipwrightAndTransport.Compat
         private static T Ask<T>(Func<T> call, T fallback)
         {
             try { return call(); }
-            catch (Exception e)
-            {
-                if (!failed) { failed = true; Log.Warn("Asking EconomyOverhaul failed: " + e.Message); }
-                return fallback;
-            }
+            catch (Exception e) { Failed(e); return fallback; }
+        }
+
+        private static void Failed(Exception e)
+        {
+            if (failed) return;
+            failed = true;
+            Log.Warn("Asking EconomyOverhaul failed: " + e.Message);
         }
 
         // When EconomyOverhaul takes the ship the player is aboard, it puts the player aboard their nearest own ship,
@@ -3166,7 +3496,7 @@ namespace ShipwrightAndTransport.Compat
         internal static void PatchOwnShips(Harmony harmony)
         {
             if (!Mods.Installed(Mods.EconomyOverhaulGuid)) return;
-            var type = AccessTools.TypeByName("EconomyOverhaul.Pledges");
+            var type = Mods.TypeNamed("EconomyOverhaul.Pledges");
             var method = type != null ? AccessTools.Method(type, "OwnShips", Type.EmptyTypes) : null;
             if (method == null || method.ReturnType != typeof(IEnumerable<PurchasableBoat>))
             {
@@ -3197,7 +3527,7 @@ namespace ShipwrightAndTransport.Compat
                 if (!resolved)
                 {
                     resolved = true;
-                    var type = AccessTools.TypeByName("SwappableStaysail.SailmakerSession");
+                    var type = Mods.TypeNamed("SwappableStaysail.SailmakerSession");
                     var getter = type != null ? AccessTools.PropertyGetter(type, "Active") : null;
                     if (getter != null && getter.IsStatic && getter.ReturnType == typeof(bool))
                         active = (Func<bool>)Delegate.CreateDelegate(typeof(Func<bool>), getter);
@@ -3221,7 +3551,7 @@ namespace ShipwrightAndTransport.Compat
                 resolved = true;
                 if (Mods.Installed(Mods.DinghiesGuid))
                 {
-                    var type = AccessTools.TypeByName("DinghiesScripts.Davits");
+                    var type = Mods.TypeNamed("DinghiesScripts.Davits");
                     list = type != null ? AccessTools.Field(type, "list") : null;
                     boat = type != null ? AccessTools.Field(type, "boat") : null;
                 }

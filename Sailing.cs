@@ -6223,7 +6223,7 @@ namespace ShipwrightAndTransport.Sailing
                 PatchButtonActivationOverrides(harmony);
                 Patch(harmony, AccessTools.Method(typeof(GPButtonRopeWinch), "Update"), prefix: nameof(WinchUpdatePrefix), priority: Priority.First);
                 Patch(harmony, AccessTools.Method(typeof(TouchRotateHandle), "Update"), prefix: nameof(HandleUpdatePrefix));
-                var grabbableType = AccessTools.TypeByName("OVRGrabbable");
+                var grabbableType = ShipwrightAndTransport.Compat.Mods.TypeNamed("OVRGrabbable");
                 var grabBegins = grabbableType == null ? Array.Empty<MethodInfo>() : grabbableType
                     .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic).Where(m => m.Name == "GrabBegin").ToArray();
                 if (grabBegins.Length == 0) throw new NotSupportedException("OVRGrabbable.GrabBegin was not found; cannot guard sailing handle grabs.");
@@ -6343,7 +6343,7 @@ namespace ShipwrightAndTransport.Sailing
         internal static void HoldCustomIslandUnload(Harmony harmony)
         {
             if (!Voyages.Enabled) return;
-            var patchType = AccessTools.TypeByName(CustomIslandPatchType);
+            var patchType = ShipwrightAndTransport.Compat.Mods.TypeNamed(CustomIslandPatchType);
             if (patchType == null) return;
             var method = CustomIslandUnloadMethod(patchType);
             if (method == null) { Log.Warn("Sailing: Custom Island API's island unload isn't as expected; its islands may unload under a ship in service."); return; }
@@ -7269,7 +7269,7 @@ namespace ShipwrightAndTransport.Sailing
         private static readonly FieldInfo ClickedBy = AccessTools.Field(typeof(GoPointerButton), "isClickedBy");
         private static readonly FieldInfo Grabbable = AccessTools.Field(typeof(TouchRotateHandle), "grabbable");
         private static readonly FieldInfo DebugGrabbed = AccessTools.Field(typeof(TouchRotateHandle), "debugGrabbed");
-        private static readonly Type GrabType = AccessTools.TypeByName("OVRGrabbable");
+        private static readonly Type GrabType = ShipwrightAndTransport.Compat.Mods.TypeNamed("OVRGrabbable");
         private static readonly PropertyInfo IsGrabbed = AccessTools.Property(GrabType, "isGrabbed");
         private static readonly FieldInfo HeldItem = AccessTools.Field(typeof(GoPointer), "heldItem");
 
@@ -14082,7 +14082,7 @@ namespace ShipwrightAndTransport.Compat
         internal static void KeepOffShipsInService(Harmony harmony)
         {
             if (!Mods.Installed(Guid)) return;
-            var found = FindServiceTargets(AccessTools.TypeByName, out string why);
+            var found = FindServiceTargets(ShipwrightAndTransport.Compat.Mods.TypeNamed, out string why);
             if (found == null)
             {
                 Log.Warn("VirtualCrew changed (" + why + "): it can't be kept off a ship in service, so transports are carried.");

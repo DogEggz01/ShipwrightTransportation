@@ -31,7 +31,9 @@ namespace ShipwrightAndTransport
             return saveable && IsAway(saveable.sceneIndex);
         }
 
-        internal static int DailyFee(StoredShip record, int currency) => Fees.Coins(Fees.StorageUnits(record.feeUnits, record.cargoUnits), Money.Rate(currency));
+        // Every fee due goes through here (take-out, sale, Add to trade fleet, a transport's storage share): 0 at a wharf (Fees.FreeStorage).
+        internal static int DailyFee(StoredShip record, int currency) =>
+            Fees.FreeStorage(record.shipyard) ? 0 : Fees.Coins(Fees.StorageUnits(record.feeUnits, record.cargoUnits), Money.Rate(currency));
 
         // The value of every item aboard her, in fee units (Fees, the cargo shares): each item's ShipItem.value, the game's base
         // value. A sealed crate's value is its goods' (ShipItemCrate.OnLoad); a plate's grows with its size (PlateScaling).
@@ -270,6 +272,7 @@ namespace ShipwrightAndTransport
         internal static string RefusalToTakeOut(Shipyard yard, ShipyardInfo info, StoredShip record)
         {
             if (record.shipyard != info.Name) return "Take it out at\n" + record.shipyard + ".";
+            if (Trading(record)) return InFleet;
             var transport = Transport.RecordOf(record.saveIndex);
             if (transport != null) return transport.tow ? "It is under tow." : "It is booked for transport.";
             if (GameState.currentShipyard) return "The shipyard is busy.";
@@ -314,6 +317,7 @@ namespace ShipwrightAndTransport
         internal static string RefusalToSell(ShipyardInfo info, StoredShip record)
         {
             if (record.shipyard != info.Name) return "Sell it at\n" + record.shipyard + ".";
+            if (Trading(record)) return InFleet;
             if (Transport.RecordOf(record.saveIndex) != null) return "It is booked for transport.";
             if (CopyEngine.RecordOfIndex(record.saveIndex) == null) return NotSellable;
             return HoldsFinanced(record.saveIndex) ? FinancedAboard : null;
@@ -371,20 +375,38 @@ namespace ShipwrightAndTransport
 
         // Her button shows only where she may join (Q15: "the option shows only when that region has a free place"): EconomyOverhaul
         // with the trade fleet, a copy stored at this yard, and an office of its region with the trade fleet and room for her hull.
+        // An original (a ship of the game's own hulls the yards didn't build) joins too, kept stored and hidden while it trades
+        // (FLEET_ORIGINALS_DRAFT.md; the user, 2026-11-14: "let original copy be assign as trader also? like don't destroy it, still
+        // let it stay in storage but hidden?"), with an EconomyOverhaul that keeps it (KeptKnown).
         internal static bool FleetOffered(ShipyardInfo info, StoredShip record)
         {
-            if (record == null || record.shipyard != info.Name || !Compat.EconomyOverhaul.FleetKnown) return false;
+            if (record == null || Trading(record) || record.shipyard != info.Name || !Compat.EconomyOverhaul.FleetKnown) return false;
             var copy = CopyEngine.RecordOfIndex(record.saveIndex);
+            int hull = FleetHull(record.saveIndex, copy);
+            if (hull < 0 || copy == null && !Compat.EconomyOverhaul.KeptKnown) return false;
             int region = FleetRegion(info);
-            return copy != null && region >= 0 && Compat.EconomyOverhaul.FleetRefusal(region, copy.hull) == null;
+            return region >= 0 && Compat.EconomyOverhaul.FleetRefusal(region, hull) == null;
         }
 
+        // The hull a stored ship joins as: a copy's own; an original's save index when it is one of the game's hulls (a vanilla ship's
+        // save index is its hull, ShipTypes.VanillaHulls); -1 for any other ship (another mod's: EconomyOverhaul draws only the game's).
+        internal static int FleetHull(int saveIndex, CopyRecord copy) =>
+            copy != null ? copy.hull : Array.IndexOf(ShipTypes.VanillaHulls, saveIndex) >= 0 ? saveIndex : -1;
+
+        // An original trading in the fleet: stored, hidden, off the ship list (FleetKeeping).
+        internal static bool Trading(StoredShip record) => record != null && record.fleetTrader != 0;
+
         internal const string NotFleetable = "Only ships the shipyards\nbuilt can trade.";
+        internal const string NotGameHull = "Only the game's own\nhulls can trade.";
+        // The guards' text for a page left open as the ship joined (the ship list no longer shows it).
+        internal const string InFleet = "It trades in the\nfleet.";
         // The user's Q9 ("As you said"): refused while cargo is aboard. Any item of the ship's counts, as its cargo's value does
         // (CargoValue): it would go with the ship, unpaid.
         // A ship with sails or hull options from other mods joins too (the user, 2026-11-09: "ship should be allowed to add into trade
         // fleet even if it use modded sail and hull option", in place of Q10's refusal of a sail not the game's own): EconomyOverhaul
-        // draws them, and takes the ship out of its fleet, 80% paid, if that mod is later missing.
+        // draws them, and takes the ship out of its fleet, 80% paid, if that mod is later missing. Except the sails EconomyOverhaul
+        // can't draw, MoreSailwindSails' Fisherman sails (the user, 2026-11-09: "refuse sail from this mod to be admit to trader
+        // fleet."): its OfficeFleetApi.SailRefusal says so, read off the parked ship.
         internal const string ItemsAboard = "Take every item off\nthe ship first.";
         internal const string RigUnread = "The ship's rig\ncan't be read.";
         internal const string FleetFailed = "The ship couldn't join\nthe trade fleet.";
@@ -395,15 +417,21 @@ namespace ShipwrightAndTransport
         internal static string RefusalToFleet(ShipyardInfo info, StoredShip record)
         {
             if (record.shipyard != info.Name) return "Add it at\n" + record.shipyard + ".";
+            if (Trading(record)) return InFleet;
             if (Transport.RecordOf(record.saveIndex) != null) return "It is booked for transport.";
             var copy = CopyEngine.RecordOfIndex(record.saveIndex);
-            if (copy == null) return NotFleetable;
+            int hull = FleetHull(record.saveIndex, copy);
+            if (hull < 0) return NotGameHull;
+            if (copy == null && !Compat.EconomyOverhaul.KeptKnown) return NotFleetable;
             if (Compat.EconomyOverhaul.IsPledged(record.saveIndex)) return "Repay the loan first.";
             if (HoldsFinanced(record.saveIndex)) return FinancedAboard;
             if (HoldsItems(record.saveIndex)) return ItemsAboard;
+            var parked = Ships.BoatOf(record.saveIndex);
+            string sails = parked ? Compat.EconomyOverhaul.FleetSailRefusal(parked.gameObject) : null;
+            if (sails != null) return Notify.Wrap(sails);
             int region = FleetRegion(info);
             if (region < 0 || !Compat.EconomyOverhaul.FleetKnown) return "Not available";
-            return Notify.Wrap(Compat.EconomyOverhaul.FleetRefusal(region, copy.hull));
+            return Notify.Wrap(Compat.EconomyOverhaul.FleetRefusal(region, hull));
         }
 
         // Anything of hers, loose or packed in her cache (as HoldsFinanced reads them). A copy never built has nothing.
@@ -433,27 +461,40 @@ namespace ShipwrightAndTransport
             if (refusal != null) { Notify.Show(refusal); return false; }
             int index = record.saveIndex;
             var copy = CopyEngine.RecordOfIndex(index);
+            int hull = FleetHull(index, copy);
             string name = Ships.NameOf(index);
             var boat = Ships.BoatOf(index);
             string rig = null;
-            if (boat)
+            // An original is always in the world (the game loads it with the scene), so its rig must read.
+            if (boat || copy == null)
             {
-                rig = Compat.EconomyOverhaul.FleetRig(boat.gameObject);
-                if (string.IsNullOrEmpty(rig)) { Notify.Show(RigUnread); Log.Warn(name + "'s rig couldn't be read for the trade fleet; she stays stored."); return false; }
+                rig = boat ? Compat.EconomyOverhaul.FleetRig(boat.gameObject) : null;
+                if (string.IsNullOrEmpty(rig)) { Notify.Show(RigUnread); Log.Warn(name + "'s rig couldn't be read for the trade fleet; it stays stored."); return false; }
             }
             if (due > 0 && !Money.Pay(currency, due)) return false;
-            int id = Compat.EconomyOverhaul.FleetAdd(FleetRegion(info), copy.hull, name, rig);
+            int id = copy != null ? Compat.EconomyOverhaul.FleetAdd(FleetRegion(info), hull, name, rig)
+                : Compat.EconomyOverhaul.FleetAddKept(FleetRegion(info), hull, name, rig, index);
             if (id < 0)
             {
                 Money.Refund(currency, due);
                 Notify.Show(FleetFailed);
-                Log.Warn(name + " was not added to the trade fleet (EconomyOverhaul's Add gave -1); she stays stored, the fee given back.");
+                Log.Warn(name + " was not added to the trade fleet (EconomyOverhaul's " + (copy != null ? "Add" : "AddKept") + " gave -1); it stays stored, the fee given back.");
                 return false;
+            }
+            if (copy == null)
+            {
+                // An original stays stored, hidden and off the ship list while it trades; no fee runs meanwhile (the user's default 2:
+                // the fee due paid now, counted again from the day it is freed, FleetKeeping.Free).
+                record.fleetTrader = id;
+                record.dayStored = GameClock.Day;
+                Log.Info(name + " joined the trade fleet from " + info.Name + " as EconomyOverhaul's trader " + id + ", kept in storage (slot " + record.slot +
+                    ") off the ship list until it leaves the fleet: hull " + hull + ", fee due " + due + " " + Money.Short[currency] + ", rig \"" + rig.TrimEnd('\n').Replace("\n", " | ") + "\".");
+                return true;
             }
             State.Save.stored.Remove(record);
             CopyEngine.Retire(copy, "joined the trade fleet");
             State.Save.names.RemoveAll(n => n.saveIndex == index);
-            Log.Info(name + " joined the trade fleet from " + info.Name + " as EconomyOverhaul's trader " + id + ": hull " + copy.hull + ", fee due " + due + " " +
+            Log.Info(name + " joined the trade fleet from " + info.Name + " as EconomyOverhaul's trader " + id + ": hull " + hull + ", fee due " + due + " " +
                 Money.Short[currency] + ", rig " + (rig == null ? "none (never built: her hull's stock rig)" : "\"" + rig.TrimEnd('\n').Replace("\n", " | ") + "\"") + ".");
             return true;
         }
@@ -571,6 +612,55 @@ namespace ShipwrightAndTransport
         }
     }
 
+    // Originals trading in EconomyOverhaul's fleet (FLEET_ORIGINALS_DRAFT.md): each stays stored where it joined, hidden and off the
+    // ship list, until that mod's fleet no longer keeps it (its Kept reads 0: dismissed, removed at a load, a bankruptcy, "Prepare to
+    // uninstall"), or EconomyOverhaul or its Kept is missing (the user's "Yes, build it" of that reading). Then it is freed at the same
+    // yard, nothing paid for it (the user's default 1), its fee counted from that day (default 2). Read when a board opens, after a load,
+    // at the status key and once a minute (the wharves' pace); a -1 (that mod's world not loaded yet) waits for the next read.
+    internal static class FleetKeeping
+    {
+        private const float CheckEvery = 60f;
+        private static float nextCheck;
+
+        internal static void Tick()
+        {
+            if (Time.unscaledTime < nextCheck) return;
+            nextCheck = Time.unscaledTime + CheckEvery;
+            Check();
+        }
+
+        internal static void Check()
+        {
+            if (State.Off || !State.Save.stored.Exists(Storage.Trading)) return;
+            var freed = Free(State.Save, Compat.EconomyOverhaul.FleetKept, GameClock.Day);
+            if (freed.Count == 0) return;
+            var first = State.Save.stored.Find(s => s.saveIndex == freed[0]);
+            var names = freed.ConvertAll(Ships.NameOf);
+            Log.Info("Left the trade fleet, back on the ship list: " + string.Join(", ", names.ToArray()) + " (EconomyOverhaul's fleet no longer keeps " +
+                (freed.Count == 1 ? "it" : "them") + "; nothing paid, storage fee from day " + GameClock.Day + ").");
+            Notify.Later(Freed(names[0], freed.Count, first != null ? first.shipyard : ""));
+            if (Board.IsOpen) Board.Instance.Refresh();
+        }
+
+        // The records of originals no fleet keeps now, freed: the mark cleared and the fee's count started today. Gives their save indices.
+        internal static List<int> Free(ShipwrightSave save, Func<int, int> kept, int today)
+        {
+            var freed = new List<int>();
+            foreach (var record in save.stored)
+            {
+                if (!Storage.Trading(record) || kept(record.saveIndex) != 0) continue;
+                record.fleetTrader = 0;
+                record.dayStored = today;
+                freed.Add(record.saveIndex);
+            }
+            return freed;
+        }
+
+        // The scroll's three lines of 29 letters: one ship by its name (16 letters at most) and yard, more by their number.
+        internal static string Freed(string ship, int count, string yard) =>
+            count == 1 ? ship + " left the\ntrade fleet: stored\nat " + yard + "." : count + " ships left the\ntrade fleet: back\nin storage.";
+    }
+
     // The rescue (§5.8): it reaches for lastOwnedBoat, or the nearest purchased ship. A stored ship must never be moved
     // to port; with no other ship the rescue must still finish, which vanilla waits for forever.
     [HarmonyPatch(typeof(Recovery), nameof(Recovery.RecoverPlayer))]
@@ -635,6 +725,9 @@ namespace ShipwrightAndTransport
         private GameObject confirmingShip;
         private Transform exit;
         private bool placementLogged;
+
+        // The confirm card's fee lines at a trade office's wharf (Fees.FreeStorage), as long as the usual ones.
+        internal const string FreeCard = "No storage fee at your\ntrade office's wharf.";
 
         // Where Store ship was built (the game's own layout; the confirm card's parts are placed for it) and the gap left
         // under Exit, in the menu's units.
@@ -769,10 +862,10 @@ namespace ShipwrightAndTransport
             string refusal = Storage.RefusalToStore(boat);
             if (refusal != null) { Notify.Show(refusal); return; }
             int region = GameState.currentShipyard.region;
-            // With 1% of her cargo's value, as the store will record it.
+            // With 1% of her cargo's value, as the store will record it; none at a wharf (Fees.FreeStorage; these two lines Claude's wording).
             int daily = Fees.Coins(Fees.StorageUnits(Fees.DailyUnits(boat.price), Storage.CargoValue(Ships.IndexOf(boat))), Money.Rate(region));
-            cardText.text = "Store " + Ships.NameOf(Ships.IndexOf(boat)) + " at\n" + info.Name + "?\n\n" + Money.Amount(daily) + " " + Money.Names[region] +
-                " a day,\npaid when you take it out.";
+            cardText.text = "Store " + Ships.NameOf(Ships.IndexOf(boat)) + " at\n" + info.Name + "?\n\n" + (Fees.FreeStorage(info) ? FreeCard
+                : Money.Amount(daily) + " " + Money.Names[region] + " a day,\npaid when you take it out.");
             confirmingShip = ship;
             card.SetActive(true);
             if (buttonPlate && ShipyardUI.instance && ShipyardUI.instance.selectedButtonMaterial) buttonPlate.sharedMaterial = ShipyardUI.instance.selectedButtonMaterial;
@@ -1361,7 +1454,7 @@ namespace ShipwrightAndTransport
             {
                 // Booked or under way: the tow's own page with its map, wherever it goes.
                 TowTripPage(transport);
-                page.MainButton("Name plate", () => ShowStyles(index));
+                if (SellsPlates) page.MainButton("Name plate", () => ShowStyles(index));
                 return;
             }
             switch (where)
@@ -1377,7 +1470,7 @@ namespace ShipwrightAndTransport
                     page.Block(BoardPage.Left, 0.64f, Whereabouts.Label(where, facts), Whereabouts.Value(where, facts));
                     var small = new Vector3(0.7f, 0.7f, 1f);
                     page.Button("Transport", new Vector3(0.49f, -0.602f, 0.639f), small, () => ShowDestinations(index, null, false));
-                    page.Button("Name plate", new Vector3(0f, -0.602f, 0.639f), small, () => ShowStyles(index));
+                    if (SellsPlates) page.Button("Name plate", new Vector3(0f, -0.602f, 0.639f), small, () => ShowStyles(index));
                     break;
                 default:
                     // Any other ship: one line saying where she is, Transport (a tow, SPEC.md §6: the same button as a
@@ -1386,10 +1479,14 @@ namespace ShipwrightAndTransport
                     var buttons = new Vector3(0.7f, 0.7f, 1f);
                     if (ship.Boat && transport == null)
                         page.Button("Transport", new Vector3(0.49f, -0.602f, 0.639f), buttons, () => ShowTowDestinations(index, null, false));
-                    page.Button("Name plate", new Vector3(0f, -0.602f, 0.639f), buttons, () => ShowStyles(index));
+                    if (SellsPlates) page.Button("Name plate", new Vector3(0f, -0.602f, 0.639f), buttons, () => ShowStyles(index));
                     break;
             }
         }
+
+        // No name plates at a trade office's wharf (the user's Q29: "Only paper transport and storage."): its pages have no Name plate
+        // button, the only way to the plate pages.
+        private bool SellsPlates => !info.Wharf;
 
         // A ship stored here (picture 05, storage.json).
         private void StoragePage(OwnedShip ship, StoredShip record)
@@ -1399,7 +1496,9 @@ namespace ShipwrightAndTransport
             int due = Storage.FeeDue(record, currency);
             page.Block(BoardPage.Left, 0.64f, "Stored since:", "day " + record.dayStored);
             page.Block(BoardPage.Left, 0.41f, "Storage days:", Days(Storage.Days(record)));
-            page.Block(BoardPage.Left, 0.18f, "Storage fee:", daily + " " + Money.Short[currency] + " a day", "paid when taken out");
+            // None at a trade office's wharf (Fees.FreeStorage; the user, 2026-11-16: "change this to only "Storage fee: Free"").
+            if (Fees.FreeStorage(record.shipyard)) page.Block(BoardPage.Left, 0.18f, "Storage fee:", "Free");
+            else page.Block(BoardPage.Left, 0.18f, "Storage fee:", daily + " " + Money.Short[currency] + " a day", "paid when taken out");
             page.Block(BoardPage.Right, 0.64f, "To take it out:", "empty shipyard", "no other ship in it");
             // The fee due: left-aligned in the right column, a size larger.
             page.Text(parts.PriceLabel, "Fee due:", new Vector3(BoardPage.Right, 0.36f, 0.6488f), new Vector3(0.010695f, 0.01196f, 0.0104f), BoardPage.AnchorMiddleLeft, BoardPage.AlignLeft);
@@ -1408,7 +1507,7 @@ namespace ShipwrightAndTransport
             int index = ship.Index;
             var small = new Vector3(0.7f, 0.7f, 1f);
             page.Button("Transport", new Vector3(0.49f, -0.602f, 0.639f), small, () => ShowDestinations(index, null, false));
-            page.Button("Name plate", new Vector3(0f, -0.602f, 0.639f), small, () => ShowStyles(index));
+            if (SellsPlates) page.Button("Name plate", new Vector3(0f, -0.602f, 0.639f), small, () => ShowStyles(index));
             page.Button("Take out", new Vector3(-0.49f, -0.602f, 0.639f), small, () => TakeOut(index));
             // A copy can be sold (SPEC.md §5.10): above Take out (Claude's choice of place).
             if (CopyEngine.RecordOfIndex(index) != null)
@@ -1442,11 +1541,14 @@ namespace ShipwrightAndTransport
             page.Title("Add " + Ships.NameOf(index), false);
             page.Block(BoardPage.Left, 0.70f, "Joins:", Storage.RegionNames[Storage.FleetRegion(info)] + " trade office");
             string ask = due > 0 ? "Pay " + Money.Amount(due) + " and add?" : "Add the ship now?";
-            var warning = page.Line(0, confirm ? ask : "Cannot be undone.");
+            // An original stays in storage while it trades and comes back when it leaves the fleet (FLEET_ORIGINALS_DRAFT.md; these
+            // three lines Claude's wording, in the copy's lines' places).
+            bool original = CopyEngine.RecordOfIndex(index) == null;
+            var warning = page.Line(0, confirm ? ask : original ? "Back when dismissed." : "Cannot be undone.");
             // The user (2026-11-08): "Change she leaves storage to the ship will leave storage."; two lines, as a line holds about
             // 20 letters before the main button.
-            page.Line(1, "The ship will");
-            page.Line(2, "leave storage.");
+            page.Line(1, original ? "The ship stays" : "The ship will");
+            page.Line(2, original ? "in storage." : "leave storage.");
             // The user (2026-11-08): "Use storage fee due to replace "you pay" section at the top of the add button."
             page.Fee("Storage fee due:", Money.Amount(due), Money.Names[currency]);
             BoardButton main = null;
