@@ -757,7 +757,7 @@ namespace ShipwrightAndTransport
             if (copyRefs && !copyRefs.walkCol)
             {
                 copyRefs.walkCol = DeckOf(root);
-                Log.Info("Copies: the " + root.name + " template's BoatRefs had no deck; given hers from her embark colliders (" + (copyRefs.walkCol ? copyRefs.walkCol.name : "none") + ").");
+                Log.Info("Copies: the " + root.name + " template's BoatRefs had no deck; given its own from its embark colliders (" + (copyRefs.walkCol ? copyRefs.walkCol.name : "none") + ").");
             }
             var copyMooring = root.GetComponent<BoatMooringRopes>();
             if (copyMooring) { copyMooring.mooringFront = null; copyMooring.mooringBack = null; }
@@ -799,6 +799,7 @@ namespace ShipwrightAndTransport
                 var root = go.GetComponent<SaveableObject>();
                 root.sceneIndex = block;
                 root.extraSetting = true;
+                OwnPaint(go);
                 Compat.ShipMods.BeforeActivation(go, copy.hull);
                 go.SetActive(true);
                 var refs = go.GetComponent<BoatRefs>();
@@ -822,6 +823,21 @@ namespace ShipwrightAndTransport
                 if (go) Object.Destroy(go);
                 return null;
             }
+        }
+
+        // 0.41's BoatCustomColors paints a part by setting the colour of its painted*Mat material, which Instantiate shares with
+        // the original and every copy of the hull: each copy gets its own. shortcut: the type (0.41's) found by reflection so one
+        // build runs on 0.40.1 and 0.41; typed once the workspace game is 0.41.
+        private static readonly Type PaintType = typeof(SaveableObject).Assembly.GetType("BoatCustomColors");
+        private static readonly FieldInfo[] PaintMaterials = PaintType == null ? new FieldInfo[0]
+            : Array.FindAll(PaintType.GetFields(BindingFlags.Public | BindingFlags.Instance), f => f.FieldType == typeof(Material) && f.Name.StartsWith("painted", StringComparison.Ordinal));
+
+        private static void OwnPaint(GameObject go)
+        {
+            var colors = PaintType != null ? go.GetComponent(PaintType) : null;
+            if (!colors) return;
+            foreach (var field in PaintMaterials)
+                if (field.GetValue(colors) is Material shared && shared) field.SetValue(colors, new Material(shared));
         }
 
         // The deck goes at `walk cols` local (0, 0, 250 + 150k), further on while it would overlap another deck (the
@@ -932,7 +948,7 @@ namespace ShipwrightAndTransport
             var objects = SaveLoadManager.instance ? SaveLoadManager.instance.GetCurrentObjects() : null;
             if (objects != null)
                 for (int i = block; i < block + BlockSize && i < objects.Length; i++) objects[i] = null;
-            Log.Info("Copies: copy " + copy.k + " (hull " + copy.hull + ") " + why + (boat ? "; switched off where she lay, gone from the next load." : "; she was never built."));
+            Log.Info("Copies: copy " + copy.k + " (hull " + copy.hull + ") " + why + (boat ? "; switched off where it lay, gone from the next load." : "; it was never built."));
         }
 
         // A new copy record: the next k, never reused. The number is given at completion (decision 50).
@@ -1033,7 +1049,7 @@ namespace ShipwrightAndTransport
                 names.Add(pair.Key.name + " (off " + Ships.NameOf(BlockOfParent(pair.Key.GetParentObject())) + ", now " + (pair.Value > 0 ? "aboard " + pair.Value : "in the world") + ")");
                 GameAccess.LeaveShip(pair.Key, pair.Value);
             }
-            Log.Info("Copies: " + leaving.Count + " item(s) in crates off a copy left her before the save, as at a store: " + string.Join(", ", names.ToArray()) + ".");
+            Log.Info("Copies: " + leaving.Count + " item(s) in crates off a copy left it before the save, as at a store: " + string.Join(", ", names.ToArray()) + ".");
         }
 
         internal static void RestoreAfterSave(object[] state)
@@ -1084,22 +1100,36 @@ namespace ShipwrightAndTransport
                             items.Add(prefab.PrepareSaveData());
                             if (BlockOfParent(prefab.GetParentObject()) != block) inCrates++;
                         }
-                        if (inCrates > 0) Log.Debug("Copies: copy " + copy.k + " keeps " + inCrates + " items in her crates that aren't counted aboard her.");
+                        if (inCrates > 0) Log.Debug("Copies: copy " + copy.k + " keeps " + inCrates + " items in its crates that aren't counted aboard it.");
                         var local = objects[block].localItems;
                         if (local && local.HasLocalItems()) items.AddRange(local.GetCachedItems());
                         copy.objects = Encode(data.ToArray());
                         copy.items = Encode(items.ToArray());
                     }
-                    catch (Exception e) { Log.Error("Copies: saving copy " + copy.k + " failed (her last saved state stays): " + e); }
+                    catch (Exception e) { Log.Error("Copies: saving copy " + copy.k + " failed (its last saved state stays): " + e); }
                 }
             }
             finally { if (hidden != null) CurrentObjects.SetValue(manager, hidden); }
         }
 
-        // As DoSaveGame builds it (SaveLoadManager), with the dirt texture always as PNG.
+        // 0.41's SaveObjectData constructor takes the extra cleanables' dirt (byte[][], from SaveableObject.extraTextures) before the
+        // customization; 0.40.1's has neither. shortcut: both found by reflection so one build runs on 0.40.1 and 0.41; call them
+        // directly once the workspace game is 0.41.
+        private static readonly ConstructorInfo ObjectDataConstructor = typeof(SaveObjectData).GetConstructors()[0];
+        private static readonly bool ConstructorTakesExtraDirt = ObjectDataConstructor.GetParameters().Length == 11;
+        private static readonly FieldInfo ExtraDirt = typeof(SaveableObject).GetField("extraTextures");
+
+        // As DoSaveGame builds it (SaveLoadManager), with the dirt textures always as PNG.
         private static SaveObjectData ObjectData(SaveableObject saveable, Vector3 offset)
         {
             byte[] texture = saveable.extraTexture ? saveable.extraTexture.EncodeToPNG() : null;
+            byte[][] extraDirt = null;
+            if (ExtraDirt != null && ExtraDirt.GetValue(saveable) is Texture2D[] extra)
+            {
+                extraDirt = new byte[extra.Length][];
+                for (int i = 0; i < extra.Length; i++)
+                    if (extra[i]) extraDirt[i] = extra[i].EncodeToPNG();
+            }
             SaveBoatCustomizationData customization = saveable.customization ? saveable.customization.GetData() : null;
             Quaternion sinkRotation = default(Quaternion);
             if (saveable.damage)
@@ -1114,8 +1144,12 @@ namespace ShipwrightAndTransport
                 saveable.extraSetting = saveable.anchor.IsSet();
                 saveable.extraValue = saveable.anchor.GetRopeLength();
             }
-            return new SaveObjectData(saveable.transform.position - offset, saveable.transform.rotation, sinkRotation, saveable.sceneIndex,
-                saveable.extraSetting, saveable.extraValue, saveable.extraValue1, saveable.extraValue2, texture, customization);
+            var args = ConstructorTakesExtraDirt
+                ? new object[] { saveable.transform.position - offset, saveable.transform.rotation, sinkRotation, saveable.sceneIndex, saveable.extraSetting,
+                    saveable.extraValue, saveable.extraValue1, saveable.extraValue2, texture, extraDirt, customization }
+                : new object[] { saveable.transform.position - offset, saveable.transform.rotation, sinkRotation, saveable.sceneIndex, saveable.extraSetting,
+                    saveable.extraValue, saveable.extraValue1, saveable.extraValue2, texture, customization };
+            return (SaveObjectData)ObjectDataConstructor.Invoke(args);
         }
 
         private static string Encode(object value)
@@ -1154,7 +1188,7 @@ namespace ShipwrightAndTransport
                     int block = IndexOf(copy.k);
                     SaveObjectData main = null;
                     if (data != null) foreach (var d in data) if (d.sceneIndex == block) main = d;
-                    if (main == null) { Log.Warn("Copies: copy " + copy.k + " has no saved state; she waits as a record."); copy.spawned = true; continue; }
+                    if (main == null) { BackToStorage(copy); continue; }
                     Vector3 offset = FloatingOriginManager.instance ? FloatingOriginManager.instance.outCurrentOffset : Vector3.zero;
                     var boat = Spawn(copy, (Vector3)main.position + offset, main.rotation, false);
                     if (!boat) { copy.spawned = true; continue; }
@@ -1163,9 +1197,43 @@ namespace ShipwrightAndTransport
                 catch (Exception e)
                 {
                     copy.spawned = true;
-                    Log.Error("Copies: restoring copy " + copy.k + " failed (her saved state is kept): " + e);
+                    Log.Error("Copies: restoring copy " + copy.k + " failed (its saved state is kept): " + e);
                 }
             }
+        }
+
+        // A built copy with no saved state has no place to be built again: it goes back into storage as a record, as a finished
+        // order is stored (Orders.Complete), at the yard its storage record names, else the yard that builds its hull, and is
+        // built new at its next take-out. Its rig, paint and cargo were never saved, so its record holds no cargo.
+        private static void BackToStorage(CopyRecord copy)
+        {
+            int index = IndexOf(copy.k);
+            copy.objects = "";
+            copy.items = "";
+            CacheFrames.Forget(index);
+            var record = Storage.RecordOf(index);
+            if (record == null)
+            {
+                var template = Template(copy.hull);
+                record = new StoredShip
+                {
+                    saveIndex = index, shipyard = BuildingYard(copy.hull), dayStored = GameClock.Day,
+                    lengthM = template != null ? template.Length : 10f, feeUnits = Fees.DailyUnits(Orders.Price(copy.hull)),
+                };
+                State.Save.stored.Add(record);
+            }
+            record.slot = -1;
+            record.cargoUnits = 0;
+            record.massLb = record.cargoLb = 0f;
+            Log.Warn("Copies: " + Ships.NameOf(index) + " (copy " + copy.k + ") has no saved state; it is stored at " + record.shipyard + " as a new ship of its hull, built at its next take-out.");
+        }
+
+        // The shipyard that builds a hull: one for each vanilla hull.
+        internal static string BuildingYard(int hull)
+        {
+            foreach (var info in Shipyards.Table)
+                if (Array.IndexOf(info.Builds, hull) >= 0) return info.Name;
+            return Shipyards.Table[0].Name;
         }
 
         // The next frame, after her Start (the loading screen is still up: LoadGame's caller waits 1.5 s). Each object loads
@@ -1173,7 +1241,7 @@ namespace ShipwrightAndTransport
         private static IEnumerator LoadAfterStart(CopyRecord copy, PurchasableBoat boat, SaveObjectData[] data, SavePrefabData[] items)
         {
             yield return null;
-            if (!boat) { Log.Error("Copies: copy " + copy.k + " was gone before her state was loaded."); yield break; }
+            if (!boat) { Log.Error("Copies: copy " + copy.k + " was gone before its state was loaded."); yield break; }
             foreach (var d in data)
             {
                 var target = SaveLoadManager.instance.GetObject(d.sceneIndex);
@@ -1396,8 +1464,8 @@ namespace ShipwrightAndTransport.Compat
                     stripped++;
                 }
             }
-            catch (Exception e) { Log.Warn("NANDFixes: preparing the " + template.name + " template failed; her copies may have a second interior trigger: " + e.Message); }
-            if (stripped > 0) Log.Info("NANDFixes: the " + template.name + " template's clipping mask lost the interior trigger NANDFixes removes from her own (" + stripped + ").");
+            catch (Exception e) { Log.Warn("NANDFixes: preparing the " + template.name + " template failed; its copies may have a second interior trigger: " + e.Message); }
+            if (stripped > 0) Log.Info("NANDFixes: the " + template.name + " template's clipping mask lost the interior trigger NANDFixes removes from its own (" + stripped + ").");
         }
 
         // MoreSailwindSails (FishermansStayRegistry.Register, a SaveableBoatCustomization.Awake postfix): it adds "Fisherman's
@@ -1455,9 +1523,9 @@ namespace ShipwrightAndTransport.Compat
                 var winches = winchType != null ? template.GetComponent(winchType) : null;
                 if (winches) UnityEngine.Object.DestroyImmediate(winches);
             }
-            catch (Exception e) { Log.Warn("MoreSailwindSails: preparing the " + template.name + " template failed; her copies may not be admitted at a shipyard: " + e); return; }
-            Log.Info("MoreSailwindSails: the " + template.name + " template lost the Fisherman's Stays her original got (" + parts + " parts, "
-                + objects + " objects" + (missed > 0 ? ", " + missed + " not found" : "") + "); her copies register their own.");
+            catch (Exception e) { Log.Warn("MoreSailwindSails: preparing the " + template.name + " template failed; its copies may not be admitted at a shipyard: " + e); return; }
+            Log.Info("MoreSailwindSails: the " + template.name + " template lost the Fisherman's Stays its original got (" + parts + " parts, "
+                + objects + " objects" + (missed > 0 ? ", " + missed + " not found" : "") + "); its copies register their own.");
         }
 
         // The template's object made from an original's object straight under her root or her deck: the same name, and the

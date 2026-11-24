@@ -221,7 +221,7 @@ namespace ShipwrightAndTransport
             if (!boat || GameState.currentShipyard != yard || yard.GetCurrentBoat() != boat.gameObject || index <= 0)
             {
                 Notify.Show(StoreCancelled);
-                Log.Info("Storing " + (index > 0 ? Ships.NameOf(index) : "a ship") + " was cancelled: the shipyard no longer held her when her slide ended.");
+                Log.Info("Storing " + (index > 0 ? Ships.NameOf(index) : "a ship") + " was cancelled: the shipyard no longer held it when its slide ended.");
                 yield break;
             }
             int slot = Parking.FreeSlot(State.Save.stored);
@@ -233,6 +233,14 @@ namespace ShipwrightAndTransport
                 lengthM = LengthOf(boat, Ships.Describe(index, boat).Hull), feeUnits = Fees.DailyUnits(boat.price),
             };
             yard.DischargeShip();
+            // 0.41's DischargeShip lets nothing go while the admit's slide still runs (Shipyard.movingShip): with the game paused
+            // the real-time limit can end the wait first, and the shipyard then still holds the ship.
+            if (GameState.currentShipyard == yard)
+            {
+                Notify.Show(StoreCancelled);
+                Log.Info("Storing " + name + " was cancelled: the shipyard didn't let it go (its slide still ran).");
+                yield break;
+            }
             yield return null;
             // Her cargo's value counts in her fees from now on; it is packed with her, so it can't change while she is stored.
             var items = boat.GetComponent<BoatLocalItems>();
@@ -495,7 +503,7 @@ namespace ShipwrightAndTransport
             CopyEngine.Retire(copy, "joined the trade fleet");
             State.Save.names.RemoveAll(n => n.saveIndex == index);
             Log.Info(name + " joined the trade fleet from " + info.Name + " as EconomyOverhaul's trader " + id + ": hull " + hull + ", fee due " + due + " " +
-                Money.Short[currency] + ", rig " + (rig == null ? "none (never built: her hull's stock rig)" : "\"" + rig.TrimEnd('\n').Replace("\n", " | ") + "\"") + ".");
+                Money.Short[currency] + ", rig " + (rig == null ? "none (never built: its hull's stock rig)" : "\"" + rig.TrimEnd('\n').Replace("\n", " | ") + "\"") + ".");
             return true;
         }
 
@@ -550,7 +558,7 @@ namespace ShipwrightAndTransport
             bool admitted = GameState.currentShipyard != null || GameAccess.ActivateDocuments(yard, boat.gameObject);
             if (!admitted && GameState.currentShipyard == null)
             {
-                Log.Warn("The documents click didn't admit " + name + "; admitting her directly.");
+                Log.Warn("The documents click didn't admit " + name + "; admitting it directly.");
                 admitted = GameAccess.AdmitShip(yard, boat.gameObject);
             }
             if (admitted) return true;
@@ -1056,7 +1064,7 @@ namespace ShipwrightAndTransport
                     // only in the anchor's own physics step (a short line) or when it is pulled loose. Released here the game's
                     // way, it hangs from her bow again; 0.1.4 carried it, still set, wherever it was (seen in the air).
                     if (mooring.anchor && GameAccess.ReleaseAnchor(mooring.anchor))
-                        Log.Info(Ships.NameOf(Ships.IndexOf(boat)) + ": her anchor was set; released before the move.");
+                        Log.Info(Ships.NameOf(Ships.IndexOf(boat)) + ": its anchor was set; released before the move.");
                     if (controller) controller.ResetAnchor();
                 }
                 var body = boat.GetComponent<Rigidbody>();
@@ -1083,9 +1091,9 @@ namespace ShipwrightAndTransport
                 // Reeled in again after the move (the game's own steps may have let line out while it was released).
                 if (controller) controller.ResetAnchor();
                 if (mooring && mooring.anchor && mooring.anchor.IsSet())
-                    Log.Warn(Ships.NameOf(Ships.IndexOf(boat)) + ": her anchor is still set after the move.");
+                    Log.Warn(Ships.NameOf(Ships.IndexOf(boat)) + ": its anchor is still set after the move.");
                 if (anchor && controller)
-                    Log.Info(Ships.NameOf(Ships.IndexOf(boat)) + ": her anchor is " + Vector3.Distance(anchor.position, controller.transform.position).ToString("F1") +
+                    Log.Info(Ships.NameOf(Ships.IndexOf(boat)) + ": its anchor is " + Vector3.Distance(anchor.position, controller.transform.position).ToString("F1") +
                         " m from its line's fitting after the move (kinematic " + (anchorBody && anchorBody.isKinematic) + ").");
                 // Brought near the player: check her distance at once, so she switches on and her cargo comes back; and give back
                 // what a world shift took while she was hidden in her slot, which no shift will while the player stands at the
@@ -1095,7 +1103,7 @@ namespace ShipwrightAndTransport
                 {
                     GameAccess.RefreshHorizon(boat);
                     for (float end = Time.realtimeSinceStartup + 10f; GameAccess.WorldShifting() && Time.realtimeSinceStartup < end;) yield return null;
-                    if (GameAccess.ClearStaleShift(boat)) Log.Info(Ships.NameOf(Ships.IndexOf(boat)) + ": a world shift from while she was hidden was given back (RestoreMomentum).");
+                    if (GameAccess.ClearStaleShift(boat)) Log.Info(Ships.NameOf(Ships.IndexOf(boat)) + ": a world shift from while it was hidden was given back (RestoreMomentum).");
                 }
             }
             finally { moving = false; Running--; }
@@ -1172,9 +1180,10 @@ namespace ShipwrightAndTransport
                 catch (Exception e) { Log.Warn("Shipyard exit: noting the anchor failed: " + e.Message); }
             }
 
-            private static void Postfix(Carry __state)
+            // A discharge 0.41 refused during the admit's slide keeps its currentShip.
+            private static void Postfix(Shipyard __instance, Carry __state)
             {
-                if (!__state.Ship || !__state.Anchor) return;
+                if (!__state.Ship || !__state.Anchor || CurrentShip(__instance)) return;
                 try
                 {
                     var anchor = __state.Anchor.GetComponent<Anchor>();
@@ -1338,7 +1347,7 @@ namespace ShipwrightAndTransport
                 foreach (var data in cached)
                     if (data != null && data.crateId != 0) (__state ?? (__state = new List<int>())).Add(data.instanceId);
             }
-            catch (Exception e) { Log.Warn("Crate contents: reading the cache failed (" + e.Message + "); her cargo comes back as in vanilla."); }
+            catch (Exception e) { Log.Warn("Crate contents: reading the cache failed (" + e.Message + "); its cargo comes back as in vanilla."); }
         }
 
         // Each of them, now loaded, goes into its crate as the game's own load does two frames later (InsertItem leaves an

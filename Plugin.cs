@@ -28,7 +28,7 @@ namespace ShipwrightAndTransport
     [BepInIncompatibility(StorageGuid)]
     public sealed class Plugin : BaseUnityPlugin
     {
-        public const string Guid = "DogEggz.ShipwrightTransport", PluginName = "Shipwright and Transport", Version = "0.2.1";
+        public const string Guid = "DogEggz.ShipwrightTransport", PluginName = "Shipwright and Transport", Version = "0.2.2";
         internal const string StorageGuid = "DogEggz.ShipwrightandStorage";
 
         internal static Plugin Instance;
@@ -343,7 +343,7 @@ namespace ShipwrightAndTransport
                 LeaveShip(pair.Key, pair.Value > 0 ? pair.Value : -1);
                 names.Add(pair.Key.name);
             }
-            Log.Info("Left " + leaving.Count + " item(s) in their crates off " + Ships.NameOf(index) + ", not packed with her: " + string.Join(", ", names.ToArray()) + ".");
+            Log.Info("Left " + leaving.Count + " item(s) in their crates off " + Ships.NameOf(index) + ", not packed with it: " + string.Join(", ", names.ToArray()) + ".");
         }
 
         // The crate screen keeps its place on a child of the crate last opened (CrateInventoryUI.ShowInventory parents its
@@ -803,12 +803,14 @@ namespace ShipwrightAndTransport
                 if (port && port.portIndex != TestPort) yield return port;
         }
 
+        // On the sea's plane (a far port lies km under the sea).
         internal static Port Nearest(Vector3 position)
         {
             Port best = null; float bestDistance = float.MaxValue;
             foreach (var port in All())
             {
-                float distance = (port.transform.position - position).sqrMagnitude;
+                var offset = port.transform.position - position;
+                float distance = offset.x * offset.x + offset.z * offset.z;
                 if (distance < bestDistance) { best = port; bestDistance = distance; }
             }
             return best;
@@ -3464,7 +3466,7 @@ namespace ShipwrightAndTransport.Compat
                 saveable.extraSetting = false;
                 if (GameState.lastOwnedBoat == boat.transform) GameState.lastOwnedBoat = null;
                 showSale?.Invoke(boat);
-                Log.Info(Ships.NameOf(saveable.sceneIndex) + " was seized by EconomyOverhaul's bottomry: after the load she is not yours (handed back as EconomyOverhaul hands back its seized ships).");
+                Log.Info(Ships.NameOf(saveable.sceneIndex) + " was seized by EconomyOverhaul's bottomry: after the load it is not yours (handed back as EconomyOverhaul hands back its seized ships).");
                 return true;
             }
             catch (Exception e)

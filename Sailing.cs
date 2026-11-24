@@ -29,7 +29,7 @@ namespace ShipwrightAndTransport.Sailing
         private static readonly HashSet<int> boarding = new HashSet<int>();
         private static readonly Dictionary<int, string> lastWhy = new Dictionary<int, string>();
         private static readonly HashSet<int> toldStepAshore = new HashSet<int>();
-        private static float resumeAfter, nextPoll;
+        private static float resumeAfter, nextPoll, afterSaveUntil;
         private static ConfigEntry<Vector3> npcOffset;
         private static ConfigEntry<float> npcYaw;
         private static ConfigEntry<bool> shipsSail;
@@ -124,9 +124,12 @@ namespace ShipwrightAndTransport.Sailing
             foreach (var voyage in live.Values.ToArray()) voyage.FixedTick();
         }
 
-        // Four times a second: a voyage for each sailing booking, taken in service when her ship is ready, and its phase.
+        // Four times a second: a voyage for each sailing booking, taken in service when its ship is ready, and its phase. Every frame
+        // within Scorecard.AfterSave of a save, its length into each voyage's scorecard.
         internal static void Update()
         {
+            if (Time.realtimeSinceStartup < afterSaveUntil && live.Count > 0)
+                foreach (var voyage in live.Values) voyage.FrameAfterSave(Time.unscaledDeltaTime * 1000.0);
             if (Time.realtimeSinceStartup < nextPoll) return;
             nextPoll = Time.realtimeSinceStartup + 0.25f;
             double hours = GameClock.Hours;
@@ -142,7 +145,7 @@ namespace ShipwrightAndTransport.Sailing
                     catch (Exception e)
                     {
                         // A voyage that can't be read can't sail: the paperwork rules leave a ship that isn't stored where she is.
-                        Log.Error("Sailing: " + Ships.NameOf(record.saveIndex) + "'s voyage can't be read (" + e.Message + "); her booking goes on paper.");
+                        Log.Error("Sailing: " + Ships.NameOf(record.saveIndex) + "'s voyage can't be read (" + e.Message + "); its booking goes on paper.");
                         record.mode = 0; record.job = null; record.phase = 0;
                         continue;
                     }
@@ -154,7 +157,7 @@ namespace ShipwrightAndTransport.Sailing
             foreach (var index in live.Keys.ToArray())
                 if (!State.Save.transports.Exists(t => t.saveIndex == index && t.mode == 1))
                 {
-                    live[index].Detach(Ships.NameOf(index) + ": her booking is gone.");
+                    live[index].Detach(Ships.NameOf(index) + ": its booking is gone.");
                     live.Remove(index);
                 }
         }
@@ -166,7 +169,7 @@ namespace ShipwrightAndTransport.Sailing
             {
                 if (!WorldReady()) return;
                 string notYet;
-                try { notYet = voyage.Attach(out string attachWhy) ? null : "waiting for her ship and rig to register: " + attachWhy; }
+                try { notYet = voyage.Attach(out string attachWhy) ? null : "waiting for the ship and its rig to register: " + attachWhy; }
                 catch (Exception e) { notYet = "can't be taken in service yet: " + e.Message; }
                 if (notYet != null)
                 {
@@ -233,7 +236,7 @@ namespace ShipwrightAndTransport.Sailing
                 switch (PaperStep(record, hours))
                 {
                     case PaperProgress.OnPaper:
-                        Log.Info("Sailing: " + Ships.NameOf(record.saveIndex) + "'s voyage goes on paper, the sailing transport being off (decision 225 (4)): she arrives in " +
+                        Log.Info("Sailing: " + Ships.NameOf(record.saveIndex) + "'s voyage goes on paper, the sailing transport being off (decision 225 (4)): it arrives in " +
                             record.to + " on day " + GameClock.DayOf(Transport.PaperArrival(record)) + ".");
                         break;
                     case PaperProgress.Arrived:
@@ -265,7 +268,7 @@ namespace ShipwrightAndTransport.Sailing
                 if (Transport.OnPaper(record))
                 {
                     record.paperHour = -1;
-                    Log.Info("Sailing: " + voyage.Name + " sails again: her voyage is no longer on paper (decision 206).");
+                    Log.Info("Sailing: " + voyage.Name + " sails again: its voyage is no longer on paper (decision 206).");
                 }
             }
             // Decision 206 (the user, 2026-10-13: "make it become on paper, if player approach it later it come back as sailing"): held up,
@@ -273,8 +276,8 @@ namespace ShipwrightAndTransport.Sailing
             else if (record.phase < 2 && Transport.HeldUp(record, hours))
             {
                 record.paperHour = hours;
-                Log.Warn("Sailing: " + voyage.Name + " is held up: her voyage hasn't gone on for a day" + (lastWhy.TryGetValue(record.saveIndex, out var why) ? " (" + why + ")" : "") +
-                    "; she goes on paper (decision 206): she arrives in " + record.to + " on day " + GameClock.DayOf(Transport.PaperArrival(record)) + ", unless her sailor can take her again first.");
+                Log.Warn("Sailing: " + voyage.Name + " is held up: its voyage hasn't gone on for a day" + (lastWhy.TryGetValue(record.saveIndex, out var why) ? " (" + why + ")" : "") +
+                    "; it goes on paper (decision 206): it arrives in " + record.to + " on day " + GameClock.DayOf(Transport.PaperArrival(record)) + ", unless its sailor can take it again first.");
             }
             // On paper (206), at her arrival: arrived on paper (D4), into storage half a game hour later; her sailor still sails her in
             // if he can take her with the player near.
@@ -283,7 +286,7 @@ namespace ShipwrightAndTransport.Sailing
                 double hour = Transport.PaperArrival(record);
                 record.phase = 2; record.storeHour = hour + ReleaseSpots.StoreAfterHours;
                 if (voyage.Job != null) voyage.Job.onPaper = true;
-                Log.Info("Sailing: " + voyage.Name + " reached " + record.to + " on paper (decision 206); she goes into storage on day " + GameClock.DayOf(record.storeHour) + ".");
+                Log.Info("Sailing: " + voyage.Name + " reached " + record.to + " on paper (decision 206); it goes into storage on day " + GameClock.DayOf(record.storeHour) + ".");
                 Arrived(record);
             }
         }
@@ -371,7 +374,7 @@ namespace ShipwrightAndTransport.Sailing
             if (record.phase == 2) return;
             record.phase = 2; voyage.Job.onPaper = true; record.storeHour = hour + ReleaseSpots.StoreAfterHours;
             voyage.CaptureForSave(false);
-            Log.Info("Sailing: " + voyage.Name + " reached " + record.to + " far from the player; she goes into storage on day " + GameClock.DayOf(record.storeHour) + ".");
+            Log.Info("Sailing: " + voyage.Name + " reached " + record.to + " far from the player; it goes into storage on day " + GameClock.DayOf(record.storeHour) + ".");
             Arrived(record);
         }
 
@@ -414,30 +417,31 @@ namespace ShipwrightAndTransport.Sailing
             };
             State.Save.stored.Add(stored);
             var boat = Ships.BoatOf(record.saveIndex);
-            if (!boat) { Log.Warn(name + " was not found; her storage record waits at " + record.to + "."); return; }
+            if (!boat) { Log.Warn(name + " was not found; its storage record waits at " + record.to + "."); return; }
             // Her cargo's value and weight, as Store ship measures them (Storage.Store: her fees, her next transport's speed).
             stored.massLb = Weights.ShipMass(boat);
             stored.cargoUnits = GameAccess.PackCargo(boat.GetComponent<BoatLocalItems>(), out stored.cargoLb);
             Storage.ForgetBoat(boat.transform);
             Plugin.Instance.StartCoroutine(Teleporter.Move(boat, Parking.World(State.Save.parkingField, slot), Parking.Heading, false));
-            Log.Info("Stored " + name + " (save index " + record.saveIndex + ") at " + record.to + ", slot " + slot + ", after her voyage, cargo worth " +
+            Log.Info("Stored " + name + " (save index " + record.saveIndex + ") at " + record.to + ", slot " + slot + ", after its voyage, cargo worth " +
                 stored.cargoUnits + " units, " + Weights.Text(stored.massLb, stored.cargoLb) + ".");
         }
 
         // ---- Saving and loading ----
 
-        // The game is about to save (SaveLoadManager.SaveGame): under vanilla's own refusal conditions nothing happens. Each
-        // sailor lets go, so the game saves her settled, and takes her back 2 s later.
+        // The game is about to save (SaveLoadManager.SaveGame): under vanilla's own refusal conditions nothing happens. Each voyage
+        // takes the step Voyage.SaveStepFor gives it; a sailor that lets go is taken back 2 s later.
         internal static void BeforeSave()
         {
             if (!Enabled || live.Count == 0) return;
             if (!SaveLoadManager.instance || SaveBusy || GameState.inBed || !SaveLoadManager.readyToSave || GameState.currentShipyard) return;
             foreach (var voyage in live.Values)
             {
-                try { voyage.CaptureForSave(voyage.Mode == VoyageMode.Sailing || voyage.Mode == VoyageMode.Holding); }
+                try { voyage.BeforeSave(); }
                 catch (Exception e) { Log.Error("Sailing: saving " + voyage.Name + "'s voyage failed: " + e); }
             }
             resumeAfter = Time.realtimeSinceStartup + 2f;
+            afterSaveUntil = Time.realtimeSinceStartup + (float)Scorecard.AfterSave;
         }
 
         // Shipwright's data is written (SaveModDataPatch): every voyage's latest state goes into its record first.
@@ -474,22 +478,24 @@ namespace ShipwrightAndTransport.Sailing
             if (!Enabled || !GameBindings.WaterPatchReady || !Voyage.MooringBindingsReady) return "Sailing transport is off.";
             if (shipsSail != null && !shipsSail.Value) return "Ships sail is off in the config.";
             if (CompatibilityGate.HasConflict) return CompatibilityGate.ConflictReason;
-            if (stored.lengthM < Fees.CarriedBelowMetres) return "She rides aboard a carrier.";
+            if (stored.lengthM < Fees.CarriedBelowMetres) return "It rides aboard a carrier.";
             if (carried.TryGetValue(stored.saveIndex, out var known) && Time.realtimeSinceStartup < known.Key) return known.Value;
             string why = null;
             try
             {
                 var boat = ShipForChecks(stored.saveIndex, out bool owned);
-                if (!boat) why = "Her ship isn't in the game.";
+                if (!boat) why = "The ship isn't in the game.";
                 else
                 {
                     var context = BoatContext.Resolve(boat, owned);
                     var rig = RigScanner.Scan(context);
-                    if (!rig.Supported) why = "The sailor doesn't know her rig: " + rig.Errors.FirstOrDefault();
+                    if (!rig.Supported) why = "The sailor doesn't know its rig: " + rig.Errors.FirstOrDefault();
                     else new NavigationWater(context, context.Contains);
                 }
             }
             catch (Exception e) { why = e.Message; }
+            if (why != null && (!carried.TryGetValue(stored.saveIndex, out var was) || was.Value != why))
+                Log.Info("Sailing: ship " + stored.saveIndex + " would go on paper: " + why);
             carried[stored.saveIndex] = new KeyValuePair<float, string>(Time.realtimeSinceStartup + 10f, why);
             return why;
         }
@@ -516,7 +522,7 @@ namespace ShipwrightAndTransport.Sailing
             catch (Exception e) { Log.Info("Sailing: " + Ships.NameOf(stored.saveIndex) + "'s hull can't be measured for the berth (" + e.Message + ")."); return BerthMustBeFree; }
             var occupant = Berths.Occupant(berth.Place(footprint.Side), berth.Heading, footprint, null);
             if (!occupant) return null;
-            Log.Info("Sailing: the service berth at " + info.Name + " is taken by " + occupant.name + " (its hull in her footprint there, its middle " +
+            Log.Info("Sailing: the service berth at " + info.Name + " is taken by " + occupant.name + " (its hull in its footprint there, its middle " +
                 Vector3.Distance(occupant.transform.position, berth.Place(footprint.Side)).ToString("0") + " m from the berth" +
                 (occupant.isPurchased() ? "" : ", not the player's") + ").");
             return BerthMustBeFree;
@@ -528,7 +534,7 @@ namespace ShipwrightAndTransport.Sailing
         private static NavigationWater WaterOf(StoredShip stored)
         {
             var boat = ShipForChecks(stored.saveIndex, out bool owned);
-            if (!boat) throw new InvalidOperationException("Her ship isn't in the game.");
+            if (!boat) throw new InvalidOperationException("The ship isn't in the game.");
             var context = BoatContext.Resolve(boat, owned);
             return new NavigationWater(context, context.Contains);
         }
@@ -577,18 +583,29 @@ namespace ShipwrightAndTransport.Sailing
         }
 
         private static TransportRecord WaitingAt(string shipyard) => State.Save.transports.Find(t => t.mode == 1 && t.phase == 0 && t.from == shipyard);
+        // A booked ship waits at this port's service berth.
+        internal static bool WaitsAtBerth(string shipyard) => WaitingAt(shipyard) != null;
         private static string BerthTaken(TransportRecord waiting) => "The berth is taken until\nday " + GameClock.DayOf(waiting.departHour) + ".";
 
         // The route at the booking, while the origin island is loaded (the player is at its shipyard): out of the harbour from
         // the service berth, then around the islands to a staging point outside the destination's island (on a fine grid out
         // of the harbour first when the one-grid plan finds no way, review M4). Null, with why, when there is no clear way.
+        // The routes' no-go off the true wind at the booking, as a voyage reckons it (Voyage.NoGo): the rig's least angle to the apparent wind
+        // (SailControlAdapters.UpwindLimit) turned to the true wind at Voyage.ChartBeatSpeed; 75 with a square sail, else 60, where it can't
+        // be read.
+        private static double BookingNoGo(BoatContext context, RigSnapshot rig, float wind)
+        {
+            try { return NavigationMath.Clamp(UpwindLimits.TrueAngle(new SailControlAdapters(context, rig).UpwindLimit(out _), wind, Voyage.ChartBeatSpeed), 10, 89); }
+            catch (Exception) { return rig.Sails.Any(s => s.squareSail) ? 75 : 60; }
+        }
+
         internal static VoyageJob PlanJob(StoredShip stored, Transport.Quote quote, Shipyard yard, out string why)
         {
             why = null;
             try
             {
                 var boat = ShipForChecks(stored.saveIndex, out bool owned);
-                if (!boat) { why = "Her ship isn't in the game."; return null; }
+                if (!boat) { why = "The ship isn't in the game."; return null; }
                 var context = BoatContext.Resolve(boat, owned);
                 var rig = RigScanner.Scan(context);
                 if (!rig.Supported) { why = "Unsupported rig."; return null; }
@@ -611,7 +628,7 @@ namespace ShipwrightAndTransport.Sailing
                 var destination = Voyage.Point(FloatingOriginManager.instance.ShiftingPosToRealPos(port.transform.position));
                 var wind = Vector3.ProjectOnPlane(Wind.currentWind, Vector3.up);
                 double windFrom = NavigationMath.Heading(-wind.x, -wind.z);
-                double noGo = rig.Sails.Any(s => s.squareSail) ? 75 : 60;
+                double noGo = BookingNoGo(context, rig, wind.magnitude);
                 var goal = water.ChartGoal(origin, destination);
                 var route = RoutePlanner.PlanDepartureStaged(origin, goal, Voyage.Ahead(origin, yaw, Math.Max(60, water.Length * 4)), water.Clear, windFrom, noGo);
                 if (route.Length < 2) { why = "No clear way out of the harbour: " + water.Obstruction; return null; }
@@ -696,13 +713,13 @@ namespace ShipwrightAndTransport.Sailing
                             yield return new WaitForFixedUpdate();
                             record.job.toBerth = true; ++record.job.revision;
                             GameAccess.RefreshHorizon(ship);
-                            Log.Info("Sailing: " + Ships.NameOf(record.saveIndex) + " is released by the shipyard of " + record.from + "; the tow brings her to her berth; she leaves on day " + GameClock.DayOf(record.departHour) + ".");
+                            Log.Info("Sailing: " + Ships.NameOf(record.saveIndex) + " is released by the shipyard of " + record.from + "; the tow brings it to its berth; it leaves on day " + GameClock.DayOf(record.departHour) + ".");
                             yield break;
                         }
                         // Backed out (Storage.Admit leaves her release to its caller): once the admit's slide is over, so it can't put her
                         // back at the edit spot, she is placed at the release spot below.
                         while (!Storage.SlideOver(started)) yield return null;
-                        Log.Info("Sailing: " + Ships.NameOf(record.saveIndex) + ": the shipyard couldn't admit her; she is placed at its release spot instead.");
+                        Log.Info("Sailing: " + Ships.NameOf(record.saveIndex) + ": the shipyard couldn't admit it; it is placed at its release spot instead.");
                     }
                 }
                 // Where she is put: the release spot, else her place at the berth for her own beam (decision 129).
@@ -736,7 +753,7 @@ namespace ShipwrightAndTransport.Sailing
                 }
                 if (!boat)
                 {
-                    Log.Error("Sailing: " + Ships.NameOf(record.saveIndex) + " could not be brought to the berth; her booking goes on paper.");
+                    Log.Error("Sailing: " + Ships.NameOf(record.saveIndex) + " could not be brought to the berth; its booking goes on paper.");
                     record.mode = 0; record.job = null; record.phase = 0;
                     if (!State.Save.stored.Contains(stored)) State.Save.stored.Add(stored);
                     yield break;
@@ -762,7 +779,7 @@ namespace ShipwrightAndTransport.Sailing
                 yield return new WaitForFixedUpdate();
                 if (GameAccess.UnpackWhenNear(boat.GetComponent<BoatLocalItems>())) CrateTakeOut.TakingOut(record.saveIndex);
                 GameAccess.RefreshHorizon(boat);
-                Log.Info("Sailing: " + Ships.NameOf(record.saveIndex) + (released ? " is released at the shipyard of " + record.from + "; the tow brings her to her berth; she leaves on day " : " lies at the service berth of " + record.from + " until day ") + GameClock.DayOf(record.departHour) + ".");
+                Log.Info("Sailing: " + Ships.NameOf(record.saveIndex) + (released ? " is released at the shipyard of " + record.from + "; the tow brings it to its berth; it leaves on day " : " lies at the service berth of " + record.from + " until day ") + GameClock.DayOf(record.departHour) + ".");
             }
             finally { boarding.Remove(record.saveIndex); }
         }
@@ -809,11 +826,21 @@ namespace ShipwrightAndTransport.Sailing
         private HelmAdapter helm;
         private BackgroundTravel background;
         private readonly HeadingController heading = new HeadingController();
+        // The helm that holds the sails' turning push (SailControlAdapters.HelmNeeded), from the last sail plan under way; NaN when unknown.
+        private double sailsHelm = double.NaN;
+        // The close-hauled margin the steering has earned.
+        private readonly SteeringScatter scatter = new SteeringScatter();
         private HeelGovernor heel = new HeelGovernor(1);
         private float tickClock, signatureClock;
         private ProgressWatchdog progressWatchdog = new ProgressWatchdog();
         private int exceptionReported;
-        private float holdUntil;
+        // The fault ladder; a hold's wait and what is left of it (game seconds); the sail share when the hold began, given back at its retry.
+        private readonly FaultLadder faults = new FaultLadder();
+        private double holdWait, holdLeft, heldShare = 1;
+        // How the ship sails and what it costs, per minute and per voyage (read by the in-game QA).
+        private readonly Scorecard score = new Scorecard();
+        private static readonly System.Diagnostics.Stopwatch startClock = new System.Diagnostics.Stopwatch(), steerClock = new System.Diagnostics.Stopwatch();
+        internal void FrameAfterSave(double ms) => score.FrameAfterSave(ms);
 
         internal TransportStatus Status { get; private set; } = new TransportStatus { Phase = TransportPhase.Idle };
         internal bool TakingWater { get; private set; }
@@ -847,7 +874,7 @@ namespace ShipwrightAndTransport.Sailing
             notYet = null;
             if (boat != null) return true;
             var purchasable = Ships.BoatOf(Record.saveIndex);
-            if (!purchasable) { notYet = "her ship isn't in the game yet"; return false; }
+            if (!purchasable) { notYet = "the ship isn't in the game yet"; return false; }
             // Switched off by the game (beyond her horizon) she is taken in service all the same, judged as if on as the rig scan and
             // the departure's checks judge her (RigScanner.On): the clock carries her from there (the user, 2026-10-10 night: "Fix:
             // take her in service"). A save loaded with her far away left her voyage detached for good, "her ship is switched off",
@@ -857,7 +884,7 @@ namespace ShipwrightAndTransport.Sailing
             var snapshot = RigScanner.Scan(context);
             if (!snapshot.Supported) throw new NotSupportedException("Unsupported rig: " + string.Join(" | ", snapshot.Errors));
             string current = Job != null ? RigDescriptor(context) : null;
-            if (Job != null && !RigIdentity.Matches(Job.rig, current)) { notYet = "her rig differs from her booking's (booked " + Job.rig + "; now " + current + ")"; return false; }
+            if (Job != null && !RigIdentity.Matches(Job.rig, current)) { notYet = "its rig differs from its booking's (booked " + Job.rig + "; now " + current + ")"; return false; }
             var locks = new ControlOwnership(context, snapshot);
             locks.Acquire();
             boat = context; rig = snapshot; ownership = locks;
@@ -865,7 +892,7 @@ namespace ShipwrightAndTransport.Sailing
             foreach (var yard in Shipyards.Loaded()) Shipyards.BoatsInArea(yard).Remove(context.Root.gameObject);
             signatureClock = 0;
             Mode = RestingMode;
-            Status = new TransportStatus { Phase = TransportPhase.Preparing, Message = "Locked at her berth." };
+            Status = new TransportStatus { Phase = TransportPhase.Preparing, Message = "Locked at its berth." };
             Log.Info("Sailing: " + Name + " in service (" + rig.Description + ").");
             return true;
         }
@@ -929,12 +956,12 @@ namespace ShipwrightAndTransport.Sailing
                 if (Shipyards.InfoOf(yard)?.Name == Record.from && ShipyardArea.Holds(yard, hull)) return;
             Job.leftOrigin = true;
             Log.Info("Sailing: " + Name + " is clear of " + Record.from + "'s shipyard (its area and its release spot)" + (Job.route != null && Job.route.Length > 0
-                ? ", " + HorizontalDistance(boat.StablePosition, Vector(Job.route[0])).ToString("F0") + " m from her route's start" : "") + "; the shipyard is open again (decision 218).");
+                ? ", " + HorizontalDistance(boat.StablePosition, Vector(Job.route[0])).ToString("F0") + " m from its route's start" : "") + "; the shipyard is open again (decision 218).");
         }
 
         // ---- The sailor (the prototype's service) ----
 
-        // Starts or resumes the sailor: at her departure (phase 0 to 1), after a load, after a save, or after a hold.
+        // Starts or resumes the sailor: at the departure (phase 0 to 1), after a load, or after a save that let it go (SaveStep.LetGo).
         internal bool StartSailing(out string why)
         {
             why = null;
@@ -943,19 +970,23 @@ namespace ShipwrightAndTransport.Sailing
             // A start that failed is tried again 5 s later, not every poll (it plans a route).
             if (Time.realtimeSinceStartup < nextStartAt) { why = lastStartWhy; return false; }
             nextStartAt = Time.realtimeSinceStartup + 5f;
+            startClock.Restart();
             why = lastStartWhy = TryStartSailing();
+            startClock.Stop();
+            score.Started(startClock.Elapsed.TotalMilliseconds);
             return why == null;
         }
 
         private float nextStartAt;
         private string lastStartWhy;
-        // Decision 225 (2): her sail controller kept across a game save (BeforeSave lets her sailor go, StartSailing takes her back 2 s
-        // later): her balance reefs (128, 178), the sails furled for her limit (153) and her sail mix (199) live in it, and were made anew
-        // from nothing after every save. Kept while her rig is the one it was made for.
+        // The sail controller kept through a save that lets the sailor go (SaveStep.LetGo) for StartSailing, while the rig is the one it
+        // was made for: the balance's reefs, the sails furled for the sails' limit and the sail mix live in it.
         private SailControlAdapters keptSails;
         private RigSnapshot keptSailsRig;
         // Decision 225 (2): her tack loss learned (161), kept for every navigator made for her (a save, a hold, back from the clock).
         private double keptTackLoss = TackNavigator.TackLossStart;
+        // Tacks lost on this voyage (TackNavigator.WearsOnly), kept for every navigator made for it.
+        private bool keptWearsOnly;
 
         private string TryStartSailing()
         {
@@ -984,16 +1015,16 @@ namespace ShipwrightAndTransport.Sailing
                 helm = new HelmAdapter(boat.Wheels);
                 // Decision 199: her rudder for her reef plan (whole sails); unread, her sails are reefed together as before.
                 sails.Rudder = helm.Model();
-                Log.Info("Sailing: " + Name + "'s rudder for her sail plan (decision 199): " + (sails.Rudder != null
+                Log.Info("Sailing: " + Name + "'s rudder for its sail plan (decision 199): " + (sails.Rudder != null
                     ? "rudderPower " + sails.Rudder.Power.ToString("F0") + ", dragPower " + sails.Rudder.Drag.ToString("F3") + ", full helm at " +
                       sails.Rudder.FullAngle.ToString("F0") + " degrees"
-                    : "unread: her sails are reefed together as before") + ".");
+                    : "unread: its sails are reefed together as before") + ".");
                 TryCreateHelmsman();
                 heel = new HeelGovernor(Job.deployment);
                 waterIngress = new WaterIngressSensor(boat); TakingWater = false;
                 heading.Reset(); tickClock = signatureClock = 0; exceptionReported = 0;
                 progressWatchdog = new ProgressWatchdog(Job.progressState);
-                sails.Plan((float)heel.Deployment, false);
+                sails.Plan((float)heel.Deployment);
                 background = new BackgroundTravel(boat, Job, Record.arriveHour) { LeavingPhysics = LeavingPhysics, NoGo = rig.Sails.Any(s => s.squareSail) ? 75f : 60f };
                 if (cachedResume)
                 {
@@ -1008,7 +1039,7 @@ namespace ShipwrightAndTransport.Sailing
                 Mode = VoyageMode.Sailing;
                 Status = new TransportStatus { Phase = Job.departureComplete ? TransportPhase.Sailing : TransportPhase.Preparing,
                     Message = cachedResume ? "Far travel by the clock." : "Route ready." };
-                Log.Info("Sailing: " + Name + " " + (cachedResume ? "resumed far away, by the clock" : "has her sailor") + "; waypoint " + Job.waypoint + "/" + (Job.route.Length - 1) + ".");
+                Log.Info("Sailing: " + Name + " " + (cachedResume ? "resumed far away, by the clock" : "has its sailor") + "; waypoint " + Job.waypoint + "/" + (Job.route.Length - 1) + ".");
                 return null;
             }
             catch (Exception ex)
@@ -1023,8 +1054,8 @@ namespace ShipwrightAndTransport.Sailing
             if (!GameState.playing || GameState.currentlyLoading || GameState.justStarted || GameState.loadingBoatLocalItems || GameState.changingStartRegion || GameState.recovering || Time.timeScale == 0f) return "Game must be playable, loaded, and unpaused.";
             if (GameState.currentShipyard && GameState.currentShipyard.GetCurrentBoat() == c.Root.gameObject) return "The vessel is in a shipyard.";
             if (!FloatingOriginManager.instance || FloatingOriginManager.ShiftingThisFrame) return "Wait for world coordinates to settle.";
-            // Decision 221: her cargo still aboard (a game save let her go while she sailed), she carries on out to SailWithin.
-            if (!cachedResume && !c.PlayerAboard && !(c.ObserverDistance <= DistanceHandover.SailWithin)) return "Far away: waiting for the game to cache her cargo.";
+            // Its cargo still aboard, the sailor starts it anywhere out to SailWithin.
+            if (!cachedResume && !c.PlayerAboard && !(c.ObserverDistance <= DistanceHandover.SailWithin)) return "Far away: waiting for the game to cache its cargo.";
             // Judged as if her ship were on (RigScanner.On): beyond the horizon the game switches her root off, and her helm read
             // inactive, so a ship the player had left never set out by the clock and was held up (run 20261010-093953, the arrival
             // lab's Dhow at Fort Aestrin, 89 km off).
@@ -1039,8 +1070,28 @@ namespace ShipwrightAndTransport.Sailing
             return null;
         }
 
-        // The game is going to save: her state goes into the record, and the sailor lets go so the game saves her settled.
-        // StartSailing takes her back once the save is done (Voyages).
+        // What a game save does to a voyage. Every voyage's record is written. A sailor under way in physics, sailing or held, is kept: the
+        // game's save writes no helm, sheet, reef or course. One carried by the clock is kept, its packed cargo turned to the hull's heading
+        // first, as the save writes the cache as it lies. One whose cargo is being packed or unpacked lets go, and StartSailing takes the
+        // ship back after the save.
+        internal enum SaveStep { Record, Keep, AlignCargo, LetGo }
+        internal static SaveStep SaveStepFor(VoyageMode mode, bool hasSailor, SimulationMode simulation)
+        {
+            if (!hasSailor || mode != VoyageMode.Sailing && mode != VoyageMode.Holding) return SaveStep.Record;
+            return simulation == SimulationMode.Physical ? SaveStep.Keep : simulation == SimulationMode.Background ? SaveStep.AlignCargo : SaveStep.LetGo;
+        }
+
+        // The game is about to save (Voyages.BeforeSave).
+        internal void BeforeSave()
+        {
+            var step = SaveStepFor(Mode, sails != null, Simulation);
+            if (step == SaveStep.AlignCargo) background.AlignCargoForSave();
+            if (step == SaveStep.Keep) score.Saved(0);
+            CaptureForSave(step == SaveStep.LetGo);
+        }
+
+        // The voyage's state into its record; with `releaseSailor`, the sailor lets go too (SaveStep.LetGo), its sail controller kept for
+        // StartSailing.
         internal void CaptureForSave(bool releaseSailor)
         {
             if (Job == null) return;
@@ -1058,7 +1109,6 @@ namespace ShipwrightAndTransport.Sailing
             if (releaseSailor && sails != null)
             {
                 keptSails = sails; keptSailsRig = rig;
-                if (background != null) background.ForSave = true;
                 ReleaseSailor(false);
             }
         }
@@ -1079,7 +1129,7 @@ namespace ShipwrightAndTransport.Sailing
             var controller = boat.Moorings.GetAnchorController();
             if (controller && (controller.currentLength > 0.005f || boat.Anchor.IsSet())) controller.ResetAnchor();
             Job.departureComplete = true; ++Job.revision;
-            Log.Info("Sailing: " + Name + " left her berth by the clock (the player was away).");
+            Log.Info("Sailing: " + Name + " left its berth by the clock (the player was away).");
         }
 
         // How she lies when she holds: her way, heading and the wind, whether the game has her switched on, how far the player
@@ -1094,7 +1144,7 @@ namespace ShipwrightAndTransport.Sailing
                 double heading = boat.Root.eulerAngles.y, windFrom = NavigationMath.Heading(-wind.x, -wind.z);
                 float along = boat.Body ? Vector3.Dot(boat.Body.velocity, boat.Root.forward) : 0f;
                 return "speed " + (boat.Body ? boat.Body.velocity.magnitude : 0f).ToString("F2") + " m/s, " + along.ToString("F2") + " ahead; heading " + heading.ToString("F0") +
-                    ", the wind " + wind.magnitude.ToString("F1") + " m/s from " + NavigationMath.Delta(heading, windFrom).ToString("F0") + " degrees off her bow; " +
+                    ", the wind " + wind.magnitude.ToString("F1") + " m/s from " + NavigationMath.Delta(heading, windFrom).ToString("F0") + " degrees off its bow; " +
                     (boat.Root.gameObject.activeInHierarchy ? "on" : "switched off by the game") + ", " + (background != null ? background.Mode.ToString() : "no simulation") +
                     ", the player " + boat.ObserverDistance.ToString("F0") + " m off; " + (navigator != null ? "manoeuvre " + navigator.State + ": " + navigator.Reason : "no navigator") +
                     "; sails " + (heel != null ? heel.Deployment.ToString("F2") : "?");
@@ -1104,41 +1154,94 @@ namespace ShipwrightAndTransport.Sailing
 
         // ---- Holding (D6) ----
 
-        // A fault never ends the service: she furls and holds, keeps her locks, and the sailor tries again in 2 minutes; far
-        // away the clock carries her on.
-        internal void Hold(string reason)
+        // A fault never ends the service: the ship furls and holds, keeps its locks, and the sailor tries again after the fault ladder's
+        // wait; far away the clock carries it on. A fault while holding starts the same wait again.
+        internal void Hold(string reason, FaultKind kind = FaultKind.Program)
         {
             // Decision 225 (11): "in irons" and its side cleared too: kept, her sails stayed aback after the retry toward the side chosen
             // before the hold (BackSailInIrons).
-            backing = false; ResetHelmWatch(); ironsSeconds = 0f; ironsSide = 0;
+            backing = false; ResetHelmWatch(); ironsSeconds = 0f; ironsSide = 0; holdStopping = false;
             if (Mode != VoyageMode.Sailing && Mode != VoyageMode.Holding) { Log.Warn("Sailing: " + Name + ": " + reason); return; }
-            if (Mode == VoyageMode.Sailing) Log.Warn("Sailing: " + Name + " holds: " + reason + " (" + HoldState() + ")");
+            if (Mode == VoyageMode.Sailing)
+            {
+                heldShare = heel.Deployment;
+                holdWait = faults.NextWait();
+                Log.Warn("Sailing: " + Name + " holds: " + reason + " (" + FaultText(kind) + "; tried again in " + holdWait.ToString("F0") + " s from a sail share of " + heldShare.ToString("F2") +
+                    ") (" + HoldState() + ")");
+                score.Held();
+                float ahead = Vector3.Dot(boat.Body.velocity, boat.Root.forward);
+                if ((background == null || background.Mode == SimulationMode.Physical) && !boat.Body.isKinematic && sails != null && water != null &&
+                    StopsFirst(kind, CanBack, ahead) && SternClear(water.Length))
+                {
+                    holdStopping = true; holdStopSince = Time.time; TraceFor(60);
+                    Log.Info("Sailing: " + Name + " backs its square sails to stop before it furls (" + ahead.ToString("F2") + " m/s ahead; decision 155's trim, its other sails furled).");
+                }
+            }
+            if (sails != null) SetSailTurn();
+            holdLeft = holdWait;
+            score.Interrupted("held", Time.time);
             EndTowContacts();
             Mode = VoyageMode.Holding;
-            holdUntil = Time.realtimeSinceStartup + 120f;
             if (helm != null) { helm.Demand = 0; try { helm.Apply(); } catch { } }
             Status.Phase = TransportPhase.Suspended; Status.Message = "Holding: " + reason;
         }
 
+        private static string FaultText(FaultKind kind) =>
+            kind == FaultKind.Close ? "something within the stopping distance" : kind == FaultKind.Manoeuvre ? "a turn failed" : "a fault of the program or the rig";
+
+        // A hold for something within the stopping distance, with StopWayLeast m/s or more ahead, on a rig that can back (a square sail)
+        // and its way astern clear: its square sails backed until it lies still (StillSpeed ahead or less, StopMostSeconds at most), then
+        // the hold's furl and wait.
+        internal const float StopWayLeast = 0.5f, StillSpeed = 0.1f, StopMostSeconds = 60f;
+        private bool holdStopping;
+        private float holdStopSince;
+        internal static bool StopsFirst(FaultKind kind, bool canBack, double ahead) => kind == FaultKind.Close && canBack && ahead >= StopWayLeast;
+        internal static bool StopDone(double ahead, double seconds) => ahead <= StillSpeed || seconds >= StopMostSeconds;
+
+        // While the hold's stop runs (near, in physics): the helm amidships, the square sails backed; true while it runs this tick.
+        private bool TickHoldStop(float dt)
+        {
+            float ahead = Vector3.Dot(boat.Body.velocity, boat.Root.forward), seconds = Time.time - holdStopSince;
+            if ((background == null || background.Mode == SimulationMode.Physical) && !boat.Body.isKinematic && !StopDone(ahead, seconds))
+            {
+                if (background != null && background.Tick(dt)) return true;
+                score.Holding(dt);
+                if (helm != null) { helm.Demand = 0; helm.Apply(); }
+                UpdateSailSafety(dt, 1);
+                Trace();
+                return true;
+            }
+            holdStopping = false; SetSailTurn();
+            Log.Info("Sailing: " + Name + (ahead <= StillSpeed ? " lies still" : " stops backing") + " (" + ahead.ToString("F2") + " m/s ahead after " + seconds.ToString("F0") +
+                " s backed): it furls and waits " + holdLeft.ToString("F0") + " s.");
+            return false;
+        }
+
         private void TickHolding(float dt)
         {
-            // Far away the clock carries her on; near, she furls at the winches' rate and waits for the retry.
+            if (holdStopping && TickHoldStop(dt)) return;
+            holdLeft -= dt;
+            // Far away the clock carries the ship on; near, it furls at the winches' rate and waits for the retry.
             if (background != null && background.Mode != SimulationMode.Physical) { TickFar(dt); return; }
             if (background != null && background.Tick(dt)) return;
+            score.Holding(dt);
             if (helm != null) { helm.Demand = 0; helm.Apply(); }
             try { if (sails != null && !boat.Body.isKinematic) sails.FurlAtNativeRate(dt); }
             catch (Exception e) { if (exceptionReported++ == 0) Log.Warn("Sailing: furling while holding failed: " + e.Message); }
-            if (Time.realtimeSinceStartup < holdUntil) return;
-            holdUntil = Time.realtimeSinceStartup + 120f;
+            if (holdLeft > 0) return;
             try
             {
                 float noGo = NoGo;
                 PrepareNavigation(noGo);
-                Mode = VoyageMode.Sailing; heel = new HeelGovernor(0.25); heading.Reset();
+                Mode = VoyageMode.Sailing; heel = new HeelGovernor(heldShare); heading.Reset();
                 Status.Phase = TransportPhase.Sailing; Status.Message = "Sailing again after a hold.";
-                Log.Info("Sailing: " + Name + " sails again after holding.");
+                Log.Info("Sailing: " + Name + " sails again after holding, its sail from a share of " + heldShare.ToString("F2") + ".");
             }
-            catch (Exception e) { Status.Message = "Holding: " + e.Message; }
+            catch (Exception e)
+            {
+                holdLeft = holdWait = faults.NextWait();
+                Status.Message = "Holding: " + e.Message;
+            }
         }
 
         // ---- Ticks ----
@@ -1152,6 +1255,7 @@ namespace ShipwrightAndTransport.Sailing
                 Time.timeScale == 0f || FloatingOriginManager.ShiftingThisFrame) return;
             float dt = Time.fixedDeltaTime;
             if (tickFault.Waiting(Time.realtimeSinceStartup)) return;
+            long heapBefore = GC.GetTotalMemory(false);
             try
             {
                 switch (Mode)
@@ -1162,6 +1266,7 @@ namespace ShipwrightAndTransport.Sailing
                     // Decision 203: held at the release spot until her storage (the user's 1a).
                     case VoyageMode.Moored: TickMoored(dt); break;
                 }
+                score.Made(GC.GetTotalMemory(false) - heapBefore);
             }
             catch (Exception ex)
             {
@@ -1173,7 +1278,7 @@ namespace ShipwrightAndTransport.Sailing
                         TickFault.RetrySeconds.ToString("F0") + " s): " + ex);
                     return;
                 }
-                if (exceptionReported++ == 0) Log.Error("Sailing: tick failed for " + Name + "; she holds: " + ex);
+                if (exceptionReported++ == 0) Log.Error("Sailing: tick failed for " + Name + "; it holds: " + ex);
                 Hold("Controller fault: " + ex.Message);
             }
         }
@@ -1183,6 +1288,7 @@ namespace ShipwrightAndTransport.Sailing
         private void TickSailing(float dt)
         {
             if (boat.Damage.sunk) { Hold("Vessel is sinking."); return; }
+            faults.Sailing(dt);
             signatureClock += dt;
             if (signatureClock >= 2f)
             {
@@ -1193,7 +1299,7 @@ namespace ShipwrightAndTransport.Sailing
                     // Which sail and which of its values (runs 20261010-005136 and -020912 named nothing).
                     var sailNames = boat.Root.GetComponentsInChildren<Sail>(true).GroupBy(s => s.GetInstanceID().ToString(System.Globalization.CultureInfo.InvariantCulture))
                         .ToDictionary(g => g.Key, g => g.First().name);
-                    Log.Info("Sailing: " + Name + ": her rig's fingerprint changed: " + RigScanner.Difference(rig.Signature, signature, id => sailNames.TryGetValue(id, out var n) ? n : null) + ".");
+                    Log.Info("Sailing: " + Name + ": its rig's fingerprint changed: " + RigScanner.Difference(rig.Signature, signature, id => sailNames.TryGetValue(id, out var n) ? n : null) + ".");
                     Hold("Vessel or rig changed."); return;
                 }
                 TryCreateHelmsman();
@@ -1203,10 +1309,23 @@ namespace ShipwrightAndTransport.Sailing
             if (navigator == null) PrepareNavigation(NoGo);
             if (Status.Phase == TransportPhase.Suspended) { Status.Phase = TransportPhase.Sailing; Status.Message = "Sailing."; }
             var progressTarget = Job.dockingPhase > 0 ? Job.destination : Job.route[Job.waypoint];
+            double progressLeft = RoutePoint.Distance(Point(boat.StablePosition), progressTarget);
+            // On a harbour line the chart steers and the route's point doesn't advance: progress is the line's length still to sail, the
+            // line's end its target.
+            if (Job.dockingPhase == 0 && InHarbourChart && line != null && line.Count > 1 && lineAt >= 0 && lineAt < line.Count)
+            {
+                var end = line[line.Count - 1];
+                progressTarget = end.Point;
+                progressLeft = Math.Max(0, end.Along - line[lineAt].Along);
+            }
             // Decision 222: her wait at anchor is no fault: her progress watch paused there (a sample of no time neither counts nor resets it);
             // decision 238: her wait for the seabed elsewhere too.
-            progressWatchdog.Observe((Job.anchorStage == 1 && AnchorLegOpen) || seabedWait ? 0 : dt, RoutePoint.Distance(Point(boat.StablePosition), progressTarget), progressTarget.x, progressTarget.z);
+            progressWatchdog.Observe((Job.anchorStage == 1 && AnchorLegOpen) || seabedWait ? 0 : dt, progressLeft, progressTarget.x, progressTarget.z);
             if (progressWatchdog.StalledSeconds >= 1200) { Hold("No voyage progress within the playable-time budget."); progressWatchdog = new ProgressWatchdog(); return; }
+            // Arriving in its destination's chart with no gain toward its target for ArrivalNoGainSeconds: the tow takes it in (as from holds).
+            if (chartArriving && Job.dockingPhase < 2 && !arrivalTowGivenUp && progressWatchdog.StalledSeconds >= ArrivalNoGainSeconds &&
+                (arrivalSpotKnown || (arrivalSpotKnown = ReadArrivalSpot() && !noArrivalSpot)))
+            { BeginArrivalTow("no gain toward its target in " + progressWatchdog.StalledSeconds.ToString("F0") + " s in its destination's chart"); progressWatchdog = new ProgressWatchdog(); return; }
             // The player gone while she comes off the dock: the tow lets go and the clock takes her on. The unberthing stage never
             // reached the far handover below, and beyond the horizon the game switches her off, so the tow pulled a body that
             // can't move (run 20261010-092446's arrival launch: 28 kN, 0.00 m/s, touching nothing, the player 88 km off; held). Beyond her
@@ -1217,22 +1336,32 @@ namespace ShipwrightAndTransport.Sailing
             if ((underWayNoteIn -= dt) <= 0f)
             {
                 underWayNoteIn = 60f;
-                Log.Info("Sailing: " + Name + " under way: " + HoldState() + "; the apparent wind " + Math.Abs(NavigationMath.Delta(boat.Root.eulerAngles.y, ApparentFrom())).ToString("F0") + " degrees off her bow (her dead zone " + RigMinimum.ToString("F0") + ", close-hauled " + TackNavigator.BeatOff(DeadZone, Margin).ToString("F0") + "; her routes' no-go " + NoGo.ToString("F0") + " off the true wind; " + (sails != null ? sails.AngleReport() : "no sails") + "); route " + Job.done.ToString("F0") + " of " + Job.length.ToString("F0") + " m, waypoint " + Job.waypoint +
+                if (water != null) { score.Checked(water.Checks, water.CheckMs); water.Checks = 0; water.CheckTicks = 0; }
+                var minute = score.EndMinute();
+                Log.Info("Sailing: " + Name + " under way: " + HoldState() + "; the apparent wind " + Math.Abs(NavigationMath.Delta(boat.Root.eulerAngles.y, ApparentFrom())).ToString("F0") + " degrees off its bow (its dead zone " + RigMinimum.ToString("F0") + ", close-hauled " + TackNavigator.BeatOff(DeadZone, Margin).ToString("F0") + "; its routes' no-go " + NoGo.ToString("F0") + " off the true wind; " + (sails != null ? sails.AngleReport() : "no sails") + "); route " + Job.done.ToString("F0") + " of " + Job.length.ToString("F0") + " m, waypoint " + Job.waypoint +
                     " (" + RoutePoint.Distance(Point(boat.StablePosition), Job.route[Math.Min(Job.waypoint, Job.route.Length - 1)]).ToString("F0") + " m off it, " +
-                    WaypointOffBow().ToString("F0") + " degrees off her bow; helm " + (helm == null ? "none" : helm.Released ? "let go, the game's rudder at " + helm.Current.ToString("F2")
-                    : helm.Demand.ToString("F2")) + (helmChanges > 0 ? ", let go or taken " + helmChanges + " times this minute" : "") + ")" +
+                    WaypointOffBow().ToString("F0") + " degrees off its bow; helm " + (helm == null ? "none" : helm.Demand.ToString("F2")) + ")" +
                     (Job.unberthing ? ", unberthing" : "") + (Job.dockingPhase > 0 ? ", docking " + Job.dockingPhase : "") +
-                    "; her navigation's cost this minute: the longest step " + navMostMs.ToString("F1") + " ms, " + navTotalMs.ToString("F0") + " ms in all, " +
-                    (water != null ? water.Checks : 0) + " clearance checks; her sails' plans this minute: " + sailPlans + ", the longest " + sailMostMs.ToString("F1") +
-                    " ms, " + sailTotalMs.ToString("F0") + " ms in all.");
-                helmChanges = 0; navMostMs = navTotalMs = 0; if (water != null) water.Checks = 0; sailPlans = 0; sailMostMs = sailTotalMs = 0;
+                    "; its navigation's cost this minute: the longest step " + minute.NavWorst.ToString("F1") + " ms, " + minute.NavMs.ToString("F0") + " ms in all, " +
+                    minute.Checks + " clearance checks; its sails' plans this minute: " + minute.Plans + ", the longest " + minute.PlanWorst.ToString("F1") +
+                    " ms, " + minute.PlanMs.ToString("F0") + " ms in all.");
+                Log.Info("Sailing: " + Name + "'s scorecard this minute: " + minute.Describe() + ".");
+                heel.TakeMinute(out int dips, out double longestUnder);
+                Log.Info("Sailing: " + Name + "'s deck this minute: under the sea " + dips + " times, the longest " + longestUnder.ToString("F1") + " s; its sail share for the sea " +
+                    heel.Deployment.ToString("P0") + ".");
+                // The progress watch and the hull's turn by Unity's law, for the runs' analysis.
+                float aheadNow = Vector3.Dot(boat.Body.velocity, boat.Root.forward);
+                double fullRate = sails?.Rudder != null ? HullTurn.FullHelmRate(sails.Rudder.Strength(aheadNow), sails.Rudder.FullAngle, boat.Body.angularDrag, HullTurn.YawInertia(boat.Body)) : double.NaN;
+                Log.Info("Sailing: " + Name + "'s progress watch: " + progressWatchdog.StalledSeconds.ToString("F0") + " s since its last gain, " + progressLeft.ToString("F0") + " m left to " +
+                    (Job.dockingPhase > 0 ? "its target" : InHarbourChart && line != null ? "its line's end" : "route point " + Job.waypoint) + "; its turn for full helm here " +
+                    fullRate.ToString("F1") + " degrees a second, its circle planned " + MyTurnRadius().ToString("F0") + " m (" + (Circle.Measured(true) || Circle.Measured(false) ? "measured" :
+                    Circle.Physical > 0 ? "by Unity's law" : "two hull lengths") + ").");
             }
             BackSailInIrons(dt);
             navClock.Restart();
             bool navigated = NavigateTick(dt);
             navClock.Stop();
-            double navMs = navClock.Elapsed.TotalMilliseconds;
-            navTotalMs += navMs; if (navMs > navMostMs) navMostMs = navMs;
+            score.NavTime(navClock.Elapsed.TotalMilliseconds);
             // Decision 225 (3): the handover to the clock runs whether or not her navigation holds (a tide wait, an obstructed approach,
             // the docking's waits): a player who left her then was never followed by the clock, and beyond her horizon the game switched
             // her off. Her sailor gone in the tick (moored at her destination) leaves nothing to hand over.
@@ -1250,7 +1379,10 @@ namespace ShipwrightAndTransport.Sailing
             // has reached, not from her guide point (decision 127: cutting corners to a farther point mustn't jump her clock ahead).
             Job.done = Math.Max(0, Math.Min(Job.length, RouteMath.Project(Job.route, Point(boat.StablePosition), RouteMath.LegAt(Job.route, Job.done))));
             Job.clockHour = GameClock.Hours;
+            steerClock.Restart();
             Steer(dt);
+            steerClock.Stop();
+            score.SteerTime(steerClock.Elapsed.TotalMilliseconds);
             Trace();
         }
 
@@ -1279,18 +1411,19 @@ namespace ShipwrightAndTransport.Sailing
             // Decision 215 (Claude's, a bug fix): a backing begun before she went far ends here, as a hold ends it: left set, her sails
             // were set at once (below) braced aback for it, and her first tick back ended it as a backing that failed.
             ResetHelmWatch(); ironsSeconds = 0f; ironsSide = 0; backing = false;
-            helmHeldUntil = Time.time + HelmHeldBackSeconds;
             try
             {
                 SetSailTurn();
                 sails.ResetReefPlan();
-                sails.Plan((float)heel.Deployment, false);
+                sails.Plan((float)heel.Deployment);
+                Log.Info("Sailing: " + Name + "'s hinges made again at their rest as it comes back from the clock: " + sails.RezeroHinges() + "; " +
+                    (helm != null ? helm.RezeroRudder(boat.Body) : "no helm") + ".");
                 string set = sails.TrimAtOnce();
-                Log.Info("Sailing: " + Name + "'s sails are set at once as she comes back from the clock (decision 138): " + set + "; heading " +
+                Log.Info("Sailing: " + Name + "'s sails are set at once as it comes back from the clock (decision 138): " + set + "; heading " +
                     boat.Root.eulerAngles.y.ToString("F0") + ", " + Vector3.Dot(boat.Body.velocity, boat.Root.forward).ToString("F2") + " m/s ahead, the apparent wind " +
-                    NavigationMath.Delta(boat.Root.eulerAngles.y, ApparentFrom()).ToString("F0") + " degrees off her bow (+ starboard).");
+                    NavigationMath.Delta(boat.Root.eulerAngles.y, ApparentFrom()).ToString("F0") + " degrees off its bow (+ starboard).");
             }
-            catch (Exception e) { Log.Warn("Sailing: " + Name + "'s sails couldn't be set at once as she came back (" + e.Message + "); her winches set them."); }
+            catch (Exception e) { Log.Warn("Sailing: " + Name + "'s sails couldn't be set at once as it came back (" + e.Message + "); its winches set them."); }
         }
 
         // In irons (the wind within her no-go, under 0.5 m/s, for 10 s): her crew backs her sail to bring her bow off to the side
@@ -1301,6 +1434,8 @@ namespace ShipwrightAndTransport.Sailing
         // sheeted in or eased.
         private float ironsSeconds;
         private int ironsSide;
+        // Seconds in irons before the sail is set aback.
+        private const float IronsAfter = 10f;
 
         private void BackSailInIrons(float dt)
         {
@@ -1319,36 +1454,35 @@ namespace ShipwrightAndTransport.Sailing
                 float ahead = Vector3.Dot(boat.Body.velocity, boat.Root.forward);
                 // Not while she goes astern toward something (decision 164): her sail aback would drive her onto it.
                 ironsSeconds = Math.Abs(off) < TackNavigator.BeatOff(noGo, Margin) && ahead < 0.5f && Time.time >= driftAsternUntil ? ironsSeconds + dt : 0f;
-                if (ironsSeconds >= 10f)
+                if (ironsSeconds >= IronsAfter)
                 {
                     ironsSide = off >= 0 ? 1 : -1;
-                    Log.Info("Sailing: " + Name + " lies in irons (the wind " + off.ToString("F0") + " degrees off her bow, " + boat.Body.velocity.magnitude.ToString("F2") +
-                        " m/s): her sail is set aback to bring her bow off to " + (ironsSide > 0 ? "starboard" : "port") + ".");
+                    Log.Info("Sailing: " + Name + " lies in irons (the wind " + off.ToString("F0") + " degrees off its bow, " + boat.Body.velocity.magnitude.ToString("F2") +
+                        " m/s): its sail is set aback to bring its bow off to " + (ironsSide > 0 ? "starboard" : "port") + ".");
                 }
             }
             else if (Time.time < driftAsternUntil)
             {
-                Log.Info("Sailing: " + Name + "'s sail is no longer set aback: she goes astern toward something (decision 164).");
+                Log.Info("Sailing: " + Name + "'s sail is no longer set aback: it goes astern toward something (decision 164).");
                 ironsSeconds = 0; ironsSide = 0;
             }
             else if (Math.Abs(off) >= noGo + 20 || Math.Sign(off) == -ironsSide && Math.Abs(off) > 30)
             {
-                Log.Info("Sailing: " + Name + " is off the wind again (" + off.ToString("F0") + " degrees; her sail's turning moment was " + sails.TurnMoment.ToString("F0") + " N·m).");
+                Log.Info("Sailing: " + Name + " is off the wind again (" + off.ToString("F0") + " degrees; its sail's turning moment was " + sails.TurnMoment.ToString("F0") + " N·m).");
                 ironsSeconds = 0; ironsSide = 0;
             }
             SetSailTurn();
         }
 
-        // Her sails' turn (SailControlAdapters.TurnSide): backing, braced for it; in irons, set aback toward ironsSide; else for drive.
-        // Against a weather helm she reefs instead (decision 178: decision 134's eased sheets and its low-speed turn-only sail gone).
+        // Her sails' turn (SailControlAdapters.TurnSide): backing, braced for it; in irons, set aback toward ironsSide; her sail
+        // overpowering her rudder, trimmed for the turn toward easeSide while it still draws, and reefed besides (Steer); else for drive.
         private void SetSailTurn()
         {
-            // Backing (decision 155): her sails for the turn her bow falls off in, square sails braced for the most push astern.
-            // Decision 178 (the user, 2026-10-11 night: "you should reef when you are sail overpower rudder, not letting out the sheet"):
-            // no sheet set to bear her away against a weather helm; she reefs (Steer).
-            sails.TurnSide = backing ? backSide : ironsSide != 0 ? ironsSide : 0;
-            sails.TurnOnly = backing || ironsSide != 0;
-            sails.Astern = backing;
+            // Backing (decision 155): the sails for the turn the bow falls off in, square sails braced for the most push astern. A hold's
+            // stop: square sails backed, no turn (SailControlAdapters.Stopping).
+            sails.TurnSide = backing ? backSide : ironsSide != 0 ? ironsSide : easing ? easeSide : 0;
+            sails.TurnOnly = backing || ironsSide != 0 || holdStopping;
+            sails.Astern = backing || holdStopping;
         }
 
         private double WaypointOffBow()
@@ -1370,14 +1504,16 @@ namespace ShipwrightAndTransport.Sailing
             float heading = boat.Root.eulerAngles.y, ahead = Vector3.Dot(boat.Body.velocity, boat.Root.forward);
             float turning = Vector3.Dot(boat.Body.angularVelocity, Vector3.up) * Mathf.Rad2Deg;
             Log.Info("Sailing: " + Name + " trace: heading " + heading.ToString("F0") + ", " + ahead.ToString("F2") + " m/s ahead, turning " + turning.ToString("F1") +
-                " degrees a second; helm " + (helm.Released ? "let go, the game's rudder at " + helm.Current.ToString("F2") : helm.Demand.ToString("F2")) +
+                " degrees a second; helm " + helm.Demand.ToString("F2") + ", the rudder at " + helm.BladeNow.ToString("F0") + " (asked " + helm.AskedAngle.ToString("F0") + ")" +
                 "; sails " + heel.Deployment.ToString("F2") + " (unrolled " + sails.UnrollReport() + "), " + sails.AngleReport() + "; the apparent wind " + NavigationMath.Delta(heading, ApparentFrom()).ToString("F0") +
-                " degrees off her bow (+ starboard); " + (navigator != null ? navigator.State + ": " + navigator.Reason : "no navigator") + (easing ? "; bearing away" : "") +
+                " degrees off its bow (+ starboard); " + (navigator != null ? navigator.State + ": " + navigator.Reason : "no navigator") + (easing ? "; bearing away" : "") +
                 (ironsSide != 0 ? "; in irons" : "") + (backing ? "; backing to " + backTarget.ToString("F0") : "") + (Job.unberthing ? "; leaving the berth: " + unberthStage + " to " + (double.IsNaN(escapeHeading) ? "none" : escapeHeading.ToString("F0")) +
                 ", " + displaced.ToString("F1") + " m off the dock" : "") + ".");
         }
 
         private float weatherHelmSeconds;
+        // The side her bow must turn to while her sail overpowers her rudder (+1 starboard, -1 port), for her sails' trim.
+        private int easeSide;
         private bool noWaySlowLogged, circleLogged;
         private readonly TurnCircle.Watch circleWatch = new TurnCircle.Watch();
         private bool easing;
@@ -1387,11 +1523,9 @@ namespace ShipwrightAndTransport.Sailing
         internal const double PinchedBy = 5;
         private float easeReefIn;
 
-        // Decision 132 (HelmHold): on her course she lets go of the helm and the game's own rudder holds her (HelmAdapter.Release);
-        // she takes it again when she strays, or off a plain course.
-        private float helmNoteAt = -999f, guardNoteAt = -999f, fellNoteAt = -999f;
-        // Decision 176: the turn rates for swinging through the wind's eye and for spinning against her helm (degrees a second).
-        internal const float FellTurnRate = 3f, SpinRate = 10f, SpinEnd = 4f, SpinSeconds = 1f;
+        private float guardNoteAt = -999f, fellNoteAt = -999f;
+        // The turn rates of a spin against the helm (degrees a second).
+        internal const float SpinRate = 10f, SpinEnd = 4f, SpinSeconds = 1f;
         // Decision 183: a spin is reefed against a step every SpinReefStep (was every second: the Dhow went to 30% in 7 s); a reef is let
         // out a step every LetOutStep while she is slow with nothing overpowering her helm and her helm light (SailBalance.SlowLetOut,
         // decision 186; her balance lets out only with way on, decision 128, and a slow Dhow at 30% never gathered way: runs
@@ -1400,7 +1534,6 @@ namespace ShipwrightAndTransport.Sailing
         private float letOutIn = LetOutStep;
         private bool spinning;
         private float spinSeconds;
-        private int helmChanges;
 
         // Decision 184 (d): her helm's watches start afresh when her sailor does (back from the clock, after a hold, off the dock): a
         // weather helm or a spin noted before (Steer runs in none of those stages, so nothing ended them) would reef her at once on her
@@ -1408,51 +1541,13 @@ namespace ShipwrightAndTransport.Sailing
         // Her reefs stay (decision 178).
         private void ResetHelmWatch()
         {
-            easing = false; weatherHelmSeconds = 0f; easeReefIn = 0f; spinning = false; spinSeconds = 0f; letOutIn = LetOutStep;
-        }
-
-        // Back from the clock she keeps her helm this long before she may let go of it (run 20261013-020142: let go in her first moment
-        // back, her turn zeroed by the return, she slewed round in the sea with her helm centred; HelmHold.TakeHelmYawRate).
-        private const float HelmHeldBackSeconds = 30f;
-        private float helmHeldUntil = float.NegativeInfinity;
-
-        private void UpdateHelmHold(double error, float yawRate, float forward)
-        {
-            // Not close-hauled (decision 166, the user, 2026-10-11: "could've sail more close to the wind while still be able to go
-            // forward"): let go on a beat, the game's rudder let her sag 6-7 degrees off the wind (run 20261011-163940 on EF: 46-48 off
-            // the apparent wind, her close-hauled 36, at 1.6-1.8 m/s); she keeps the helm there.
-            bool plain = navigator != null && navigator.State == Manoeuvre.Direct && !backing && !easing &&
-                ironsSide == 0 && !GivingWay && Job.dockingPhase == 0 && !Job.unberthing && !narrowTurn && Time.time >= helmHeldUntil;
-            var next = HelmHold.Next(helm.Released, plain, error, yawRate, forward, helm.Released ? helm.Current : helm.Demand);
-            string change = null;
-            if (next == HelmChange.Take)
-            {
-                change = "takes the helm again (" + (Math.Abs(error) > HelmHold.TakeHelmBeyond ? "her course " + error.ToString("F0") + " degrees off" : "not on a plain course with way on") +
-                    "; the game's rudder at " + helm.Current.ToString("F2") + ")";
-                // Decision 225 (5): her helm's controller from where her wheel lies (its sense reversed going astern, Steer).
-                heading.Reset(forward > 0 ? helm.Current : -helm.Current);
-                helm.Demand = helm.Current;
-                helm.Apply();
-            }
-            else if (next == HelmChange.LetGo)
-            {
-                change = "lets go of the helm on her course (the helm at " + helm.Demand.ToString("F2") + "; the game's rudder holds her)";
-                helm.Release();
-            }
-            if (change == null) return;
-            ++helmChanges;
-            // At most every 20 s in the log (the minute line counts them all).
-            if (Time.time - helmNoteAt < 20f) return;
-            helmNoteAt = Time.time;
-            Log.Info("Sailing: " + Name + " " + change + "; " + forward.ToString("F2") + " m/s ahead.");
+            easing = false; easeSide = 0; weatherHelmSeconds = 0f; easeReefIn = 0f; spinning = false; spinSeconds = 0f; letOutIn = LetOutStep;
         }
 
         private float underWayNoteIn = 60f;
-        // The cost of her navigation (the review of 2026-10-11 night: where her frame time goes, measured before optimizing further):
-        // each NavigateTick timed (one clock for every voyage: they tick one after another), the longest and the total given in the
-        // minute line with her clearance checks (NavigationWater.Checks), then started again.
+        // Each NavigateTick timed (one clock for every voyage: they tick one after another), summed in the voyage's scorecard and given in the
+        // minute line with the ship's clearance checks (NavigationWater.Checks).
         private static readonly System.Diagnostics.Stopwatch navClock = new System.Diagnostics.Stopwatch();
-        private double navMostMs, navTotalMs;
 
 
         private void Steer(float dt)
@@ -1463,72 +1558,49 @@ namespace ShipwrightAndTransport.Sailing
             float targetHeading = (float)NavigationMath.Heading(toTarget.x, toTarget.z);
             float currentHeading = boat.Root.eulerAngles.y;
             float yawRate = Vector3.Dot(boat.Body.angularVelocity, Vector3.up) * Mathf.Rad2Deg;
-            // Decision 133: never closer to the apparent wind than her least angle to it, but in a tack, or backing across the wind
-            // (decision 160: DV's runs 20261011-142610 and -142625, the guard held her helm out of the wind's eye and she never turned).
+            // The steering's guard, but in a tack or backing across the wind: no order closer to the apparent wind than the rig's least angle,
+            // clamped on the side the course chooser holds (the bow's in a wear, or with no chooser steering: docking, backing). An order whose
+            // turn would cross the wind's eye isn't steered: the bow holds its own side and the chooser decides (TackNavigator.BowAcross).
             if ((navigator == null || navigator.State != Manoeuvre.Tacking) && !(backing && backThroughWind))
             {
-                double guarded = UpwindLimits.Guard(targetHeading, currentHeading, ApparentFrom(), RigMinimum);
-                if (Math.Abs(NavigationMath.Delta(targetHeading, guarded)) > 0.5)
-                {
-                    if (Time.time - guardNoteAt >= 30f)
-                    {
-                        guardNoteAt = Time.time;
-                        Log.Info("Sailing: " + Name + " keeps out of the wind's dead zone: her course " + targetHeading.ToString("F0") + " lies within " + RigMinimum.ToString("F0") +
-                            " degrees of the apparent wind (from " + ApparentFrom().ToString("F0") + "); steered " + guarded.ToString("F0") + ".");
-                    }
-                    targetHeading = (float)guarded;
-                }
-                // Nor turned through it (the user, 2026-10-10 night: "i notice you still turn into dead zone and you're not tacking"):
-                // where the short way from her heading to her course crosses the apparent wind's eye, she turns the long way, round
-                // her stern, led 60 degrees at a time; only the navigator's tack crosses the wind.
                 double apparentNow = ApparentFrom();
-                int sideNow = TackNavigator.Side(apparentNow, currentHeading);
-                // Decision 173: her bow fallen across the wind's eye (inside close-hauled, slow or in irons, the wind shifting), her course
-                // just across it on the side she was on: she bears off on the side she now lies on, and her sailor takes that side
-                // (run 20261011-182737 on EN: the Dhow at 0.2-1.0 m/s off Dragon Cliffs, her bow a few degrees across, was turned 270
-                // degrees round her stern 26 times and more, and never left the harbour). A wear still goes round her stern.
-                // Decision 176: only when she has fallen across, turning under FellTurnRate; swinging through faster (her sail rounding
-                // her up against her helm), she is steered back onto her own side, not borne off down the new one (ET, runs
-                // 20261011-200820 and -200830: borne off on the side she swung onto, the Dhow spun on round, the user saw her helm locked
-                // to one side).
-                bool acrossEye = navigator != null && navigator.State != Manoeuvre.Wearing && navigator.Tack != 0 && navigator.Tack != sideNow &&
-                    Math.Abs(NavigationMath.Delta(apparentNow, currentHeading)) < TackNavigator.BeatOff(RigMinimum, Margin) &&
-                    TackNavigator.CrossesEye(currentHeading, targetHeading, apparentNow);
-                if (acrossEye && Math.Abs(yawRate) >= FellTurnRate)
+                bool chooserSteers = navigator != null && Job.dockingPhase == 0 && !backing;
+                int held = chooserSteers && navigator.State != Manoeuvre.Wearing ? navigator.Tack : 0;
+                double guarded = UpwindLimits.Guard(targetHeading, currentHeading, apparentNow, RigMinimum, held, out bool handBack);
+                if (handBack && chooserSteers)
                 {
-                    float back = (float)NavigationMath.Normalize(apparentNow + navigator.Tack * TackNavigator.BeatOff(RigMinimum, Margin));
-                    if (Time.time - fellNoteAt >= 30f)
+                    bool across = navigator.Tack != 0 && TackNavigator.Side(apparentNow, currentHeading) != navigator.Tack;
+                    var before = navigator.State;
+                    navigator.BowAcross(currentHeading, apparentNow, DeadZone, yawRate);
+                    string off = NavigationMath.Delta(apparentNow, currentHeading).ToString("F0");
+                    if (navigator.State == Manoeuvre.Tacking)
+                    {
+                        TraceFor(30);
+                        Log.Info("Sailing: " + Name + " swings through the wind's eye (" + off + " degrees off it, turning " + yawRate.ToString("F0") +
+                            " degrees a second): a tack back onto the side it held, to " + targetHeading.ToString("F0") + " (decision 176).");
+                    }
+                    else if (Time.time - fellNoteAt >= 30f)
                     {
                         fellNoteAt = Time.time;
-                        Log.Info("Sailing: " + Name + " swings through the wind's eye (" + NavigationMath.Delta(apparentNow, currentHeading).ToString("F0") + " degrees off it, turning " +
-                            yawRate.ToString("F0") + " degrees a second): steered back onto her side, " + back.ToString("F0") + " (decision 176).");
+                        Log.Info("Sailing: " + Name + (before == Manoeuvre.Wearing || before == Manoeuvre.Blocked ? " won't turn through the wind's eye to " + targetHeading.ToString("F0") + " (" + before +
+                                "): it holds the side it lies on, steered " + guarded.ToString("F0") + "."
+                            : across ? "'s bow has fallen across the wind's eye (" + off + " degrees off it, the course " + targetHeading.ToString("F0") + " back across): it takes the side it lies on, steered " +
+                                guarded.ToString("F0") + " (decision 173)."
+                            : " won't turn through the wind's eye to the course " + targetHeading.ToString("F0") + " with no tack under way: steered " + guarded.ToString("F0") + ", the course chosen again."));
                     }
-                    targetHeading = back;
                 }
-                else if (acrossEye)
+                else if (handBack && Time.time - guardNoteAt >= 30f)
                 {
-                    float onHerSide = (float)NavigationMath.Normalize(apparentNow + sideNow * TackNavigator.BeatOff(RigMinimum, Margin));
-                    if (Time.time - fellNoteAt >= 30f)
-                    {
-                        fellNoteAt = Time.time;
-                        Log.Info("Sailing: " + Name + "'s bow has fallen across the wind's eye (" + NavigationMath.Delta(apparentNow, currentHeading).ToString("F0") +
-                            " degrees off it, her course " + targetHeading.ToString("F0") + " back across): she bears off on the side she lies on, steered " + onHerSide.ToString("F0") + " (decision 173).");
-                    }
-                    navigator.FellAcross("her bow fell across the wind's eye");
-                    targetHeading = onHerSide;
+                    guardNoteAt = Time.time;
+                    Log.Info("Sailing: " + Name + " won't turn through the wind's eye to " + targetHeading.ToString("F0") + (backing ? " while backing" : Job.dockingPhase > 0 ? " while docking" : "") + ": it holds the side it lies on, steered " + guarded.ToString("F0") + ".");
                 }
-                else if (TackNavigator.CrossesEye(currentHeading, targetHeading, apparentNow))
+                else if (!handBack && Math.Abs(NavigationMath.Delta(targetHeading, guarded)) > 0.5 && Time.time - guardNoteAt >= 30f)
                 {
-                    int side = sideNow;
-                    float roundStern = (float)NavigationMath.Normalize(currentHeading + side * 60);
-                    if (Time.time - guardNoteAt >= 30f)
-                    {
-                        guardNoteAt = Time.time;
-                        Log.Info("Sailing: " + Name + " won't turn through the wind's dead zone to her course " + targetHeading.ToString("F0") + " (no tack under way): she turns round her stern, steered " +
-                            roundStern.ToString("F0") + ".");
-                    }
-                    targetHeading = roundStern;
+                    guardNoteAt = Time.time;
+                    Log.Info("Sailing: " + Name + " keeps out of the wind's dead zone: the course " + targetHeading.ToString("F0") + " lies within " + RigMinimum.ToString("F0") +
+                        " degrees of the apparent wind (from " + apparentNow.ToString("F0") + "); steered " + guarded.ToString("F0") + ".");
                 }
+                if (navigator == null || navigator.State != Manoeuvre.Tacking) targetHeading = (float)guarded;
             }
             // Decision 176: spinning against her helm (faster than SpinRate away from her course, the helm hard over against the turn
             // for SpinSeconds), she reefs a step every SpinSeconds (decision 178: reef, not the sheet) until the turn is under SpinEnd; the
@@ -1540,9 +1612,9 @@ namespace ShipwrightAndTransport.Sailing
                 Math.Abs(helm.Demand) >= 0.9f && Math.Sign(helm.Demand) == Math.Sign(yawRate);
             // Decision 225 (17): reefed at the sail on the side she spins to (SpinReefSide), not always her aftmost.
             int spinReef = SpinReefSide(yawRate, NavigationMath.Delta(currentHeading, ApparentFrom()));
-            if (!spinning) { spinSeconds = against ? spinSeconds + dt : 0f; if (spinSeconds >= SpinSeconds) { spinning = true; spinSeconds = 0f; Log.Info("Sailing: " + Name + " spins against her helm (" + yawRate.ToString("F0") + " degrees a second, her course " + spinError.ToString("F0") + " degrees off, " + spinAhead.ToString("F2") + " m/s): she reefs (decisions 176, 178): " + (sails.Balance(spinReef) ?? "her sail already at its least") + "."); } }
-            else if (Math.Abs(yawRate) < SpinEnd || backing) { spinning = false; spinSeconds = 0f; Log.Info("Sailing: " + Name + " stops spinning (" + yawRate.ToString("F0") + " degrees a second): her reef kept (decision 178)."); }
-            else if ((spinSeconds += dt) >= SpinReefStep) { spinSeconds = 0f; string more = sails.Balance(spinReef); if (more != null) Log.Info("Sailing: " + Name + " still spins (" + yawRate.ToString("F0") + " degrees a second): " + more + " (decision 178)."); }
+            if (!spinning) { spinSeconds = against ? spinSeconds + dt : 0f; if (spinSeconds >= SpinSeconds) { spinning = true; spinSeconds = 0f; string spinReefed = BalanceReef(spinReef, helm.Demand, spinAhead, out string spinNone); Log.Info("Sailing: " + Name + " spins against its helm (" + yawRate.ToString("F0") + " degrees a second, its course " + spinError.ToString("F0") + " degrees off, " + spinAhead.ToString("F2") + " m/s): it reefs (decisions 176, 178): " + (spinReefed ?? (spinNone == null || spinNone == SailControlAdapters.HelmNotSails ? "no sail reefed" : spinNone)) + "."); } }
+            else if (Math.Abs(yawRate) < SpinEnd || backing) { spinning = false; spinSeconds = 0f; Log.Info("Sailing: " + Name + " stops spinning (" + yawRate.ToString("F0") + " degrees a second): its reef kept (decision 178)."); }
+            else if ((spinSeconds += dt) >= SpinReefStep) { spinSeconds = 0f; string more = BalanceReef(spinReef, helm.Demand, spinAhead, out _); if (more != null) Log.Info("Sailing: " + Name + " still spins (" + yawRate.ToString("F0") + " degrees a second): " + more + " (decision 178)."); }
             // Giving way (decision 102): her sails in to steerage, at the winches' rate, her course kept.
             // Backing (decision 155): her sail eased over 1.5 m/s of sternway (Backing.SailLimit).
             // Decision 162 (d): nothing clear within her safety distance (she looks nearer), her sail at steerage too, so she slows while
@@ -1553,17 +1625,17 @@ namespace ShipwrightAndTransport.Sailing
             // Cliffs' basin end and struck Cube at 3.1-3.2 m/s).
             bool keepingClearNoWay = navigator != null && navigator.State == Manoeuvre.Avoiding && navigator.NoWay && !backing;
             if (keepingClearNoWay && !noWaySlowLogged)
-                Log.Info("Sailing: " + Name + " keeps clear with no course making way toward her guide point: her sail at steerage (decision 171).");
+                Log.Info("Sailing: " + Name + " keeps clear with no course making way toward its guide point: its sail at steerage (decision 171).");
             noWaySlowLogged = keepingClearNoWay;
             bool slowForWay = (lookScale < 1f || keepingClearNoWay) && !backing;
-            float limit = backing ? backSail : GivingWay || slowForWay ? Mathf.Min(DockingSailLimit(), (float)EmergencySailPolicy.SteerageDeployment) : DockingSailLimit();
+            float limit = backing ? backSail : GivingWay || slowForWay ? Mathf.Min(DockingSailLimit(), SteerageShare) : DockingSailLimit();
             // Decision 196: in narrow water, by her size. Decision 201 (g): near her berth before her destination is charted, steerage.
             if (!backing) limit = Mathf.Min(limit, Mathf.Min(NarrowSailLimit(), ArrivalChartSailLimit()));
             // Her sail overpowering her rudder (decision 134's condition): the helm hard over 4 s, her course 30 degrees and more off and
             // further off the wind than her heading, her bow not turning toward it (run 20261010-155241: outside Dragon Cliffs the Dhow
             // rounded up against full helm; run -160852: she lay 17-21 degrees off the wind at 0.7 m/s for minutes, the game's rudder
-            // weak at that speed against her lateen). Decision 178: she reefs (below) until she is within 15 degrees of it; no sheet is
-            // eased. Further off the wind, and the side of it she sails on, on the apparent wind (decision 136).
+            // weak at that speed against her lateen). Her sails are trimmed for the turn (SetSailTurn) and she reefs (below) until she is within 15 degrees of it
+            // (her course further off the wind, and the side of it she sails on, on the apparent wind, decision 136).
             double windFromNow = ApparentFrom(), error = NavigationMath.Delta(currentHeading, targetHeading);
             bool bearingAway = Math.Abs(NavigationMath.Delta(windFromNow, targetHeading)) > Math.Abs(NavigationMath.Delta(windFromNow, currentHeading));
             bool notTurning = yawRate * Math.Sign(error) < 1f;
@@ -1575,18 +1647,21 @@ namespace ShipwrightAndTransport.Sailing
             // Not in a tack: her bow crosses that angle on purpose there.
             bool tackingNow = navigator != null && navigator.State == Manoeuvre.Tacking;
             bool overpowered = bearingAway && notTurning && (Math.Abs(error) >= 30 || !tackingNow && pinched >= PinchedBy && Math.Abs(error) >= 1);
-            // Decision 184 (a): the helm hard over as the turn-rate helm (decision 179) gives it, HeadingController.HardOver.
-            weatherHelmSeconds = !backing && !helm.Released && Math.Abs(helm.Demand) >= HeadingController.HardOver - 0.01 && overpowered ? weatherHelmSeconds + dt : easing ? weatherHelmSeconds : 0f;
+            // Decision 184 (a): the helm hard over as the turn-rate helm (decision 179) gives it, HeadingController.HardOver, or less where this
+            // hull's scale makes the law's helm for it smaller (HardOverNow).
+            weatherHelmSeconds = !backing && Math.Abs(helm.Demand) >= Math.Min(HeadingController.HardOver, heading.HardOverNow) - 0.01 && overpowered ? weatherHelmSeconds + dt : easing ? weatherHelmSeconds : 0f;
             if (!easing && weatherHelmSeconds >= 4f)
             {
-                easing = true; easeReefIn = 0f; SetSailTurn();
-                Log.Info("Sailing: " + Name + "'s sail overpowers her rudder (her course " + error.ToString("F0") + " degrees off" + (pinched > 0 ? ", her bow " + pinched.ToString("F0") +
-                    " degrees inside her close-hauled angle" : "") + ", the helm hard over, " + forward.ToString("F2") + " m/s ahead): she reefs (decisions 178, 211).");
+                easing = true; easeReefIn = 0f; easeSide = error >= 0 ? 1 : -1; SetSailTurn();
+                Log.Info("Sailing: " + Name + "'s sail overpowers its rudder (its course " + error.ToString("F0") + " degrees off" + (pinched > 0 ? ", its bow " + pinched.ToString("F0") +
+                    " degrees inside its close-hauled angle" : "") + ", the helm hard over, " + forward.ToString("F2") + " m/s ahead): its sheets trimmed for the turn to " +
+                    (easeSide > 0 ? "starboard" : "port") + ", and it reefs (decisions 178, 211).");
             }
+            else if (easing && Math.Abs(error) >= 1 && (error >= 0 ? 1 : -1) != easeSide) { easeSide = error >= 0 ? 1 : -1; SetSailTurn(); }
             if (easing && Math.Abs(error) < 15 && pinched < PinchedBy)
             {
-                easing = false; weatherHelmSeconds = 0f; SetSailTurn();
-                Log.Info("Sailing: " + Name + " answers her helm again; her reef is kept (her balance lets it out on a steady course, decision 128).");
+                easing = false; easeSide = 0; weatherHelmSeconds = 0f; SetSailTurn();
+                Log.Info("Sailing: " + Name + " answers its helm again; its reef is kept (its balance lets it out on a steady course, decision 128).");
             }
             // Decision 178: a weather helm the rudder can't hold, the helm hard over and her bow still not answering, at any speed: the
             // sail making it is reefed a tenth at once and every EaseReefStep (her aftmost sail; a single sail as a whole), down to 30%,
@@ -1595,44 +1670,57 @@ namespace ShipwrightAndTransport.Sailing
             if (easing && notTurning && (easeReefIn -= dt) <= 0f)
             {
                 easeReefIn = EaseReefStep;
-                string reefed = sails.Balance(1);
+                string reefed = BalanceReef(1, forward > 0 ? helm.Demand : -helm.Demand, forward, out _);
                 if (reefed != null)
-                    Log.Info("Sailing: " + Name + " reefs against her weather helm (her course " + error.ToString("F0") + " degrees off, the helm hard over, her bow not answering, " +
+                    Log.Info("Sailing: " + Name + " reefs against its weather helm (its course " + error.ToString("F0") + " degrees off, the helm hard over, its bow not answering, " +
                         forward.ToString("F2") + " m/s): " + reefed + ".");
             }
             // Decision 183: slow, with nothing overpowering her helm, her reef comes out a step at a time, so she can gather way; decision
             // 186: only while her helm is light (SailBalance.SlowLetOut).
-            float helmNow = helm.Released ? helm.Current : helm.Demand;
+            float helmNow = helm.Demand;
             // Decision 198 (a): her turning circle measured as she turns (toward the wind: turning to the side it comes from), a sample a
-            // second once her helm's controller has asked its full turn rate the same way for a while (TurnCircle.Watch; decision 225 (10)).
+            // second once the helm has been TurnCircle.HardHelm or more the same way for a while (TurnCircle.Watch).
             bool towardWind = Math.Sign(yawRate) == Math.Sign(NavigationMath.Delta(currentHeading, windFromNow));
-            int askedFull = helm.Released ? 0 : heading.FullRateSide;
-            if (water != null && circleWatch.Due(askedFull, Time.time) && Circle.Sample(forward, yawRate, askedFull, towardWind) && !circleLogged && (Circle.Measured(true) || Circle.Measured(false)))
+            int hardSide = TurnCircle.HardSide(helm.Demand, forward);
+            if (water != null && circleWatch.Due(hardSide, Time.time) && Circle.Sample(forward, yawRate, hardSide, towardWind) && !circleLogged && (Circle.Measured(true) || Circle.Measured(false)))
             {
                 circleLogged = true;
-                Log.Info("Sailing: " + Name + "'s turning circle measured (decision 198 a): " + Circle.Describe(Math.Max(10, water.Length), HullWithoutBowsprit) + ".");
+                Log.Info("Sailing: " + Name + "'s turning circle measured (decision 198 a): " + Circle.Describe(Math.Max(10, water.Length), HullWithoutBowsprit) +
+                    (Circle.Physical > 0 ? "; before it, planned " + (Circle.Physical / TurnCircle.ReserveRate).ToString("F0") + " m by Unity's law" : "") + ".");
             }
             if (SailBalance.SlowLetOut(forward, easing || spinning || backing || weatherHelmSeconds > 0f, helmNow))
             {
                 if ((letOutIn -= dt) <= 0f)
                 {
                     letOutIn = LetOutStep;
-                    string outNow = sails.Balance(0);
-                    if (outNow != null) Log.Info("Sailing: " + Name + " is slow (" + forward.ToString("F2") + " m/s) with nothing overpowering her helm (" + Math.Abs(helmNow).ToString("F2") + "): " + outNow + " (decisions 183, 186).");
+                    string outNow = sails.Balance(0, 0, 0, out _);
+                    if (outNow != null) Log.Info("Sailing: " + Name + " is slow (" + forward.ToString("F2") + " m/s) with nothing overpowering its helm (" + Math.Abs(helmNow).ToString("F2") + "): " + outNow + " (decisions 183, 186).");
                 }
             }
             else letOutIn = LetOutStep;
-            UpdateSailSafety(dt, limit);
-            UpdateHelmHold(error, yawRate, forward);
-            if (!helm.Released)
-            {
-                // Decision 179: steered by her turn rate. Something on her way ahead (VoyageNavigation's avoidUntil): a faster turn wanted
-                // toward her clear course (AvoidTurnRate), no longer the helm forced hard over (run 20261011-120507 had hard over each way).
-                helm.Demand = (float)heading.Tick(currentHeading, targetHeading, yawRate, dt, Time.time < avoidUntil ? AvoidTurnRate : HeadingController.TurnRateMost);
-                // Vanilla reverses its yaw torque for every non-positive forward velocity, including near-zero drift.
-                if (forward <= 0) helm.Demand = -helm.Demand;
-                helm.Apply();
-            }
+            UpdateSailSafety(dt, limit, true);
+            // Decision 179: steered by her turn rate. Something on her way ahead (VoyageNavigation's avoidUntil): a faster turn wanted
+            // toward her clear course (AvoidTurnRate), no longer the helm forced hard over (run 20261011-120507 had hard over each way).
+            // Under way ahead the helm starts from the one that holds the sails' push, and the correction is scaled by the hull's turn for full
+            // helm at this speed by Unity's law (HullTurn).
+            bool ahead = forward >= TurnCircle.ResponseSpeed && !backing;
+            double feed = ahead && NavigationMath.Finite(sailsHelm) ? NavigationMath.Clamp(sailsHelm, -1, 1) : 0;
+            double yawInertia = HullTurn.YawInertia(boat.Body);
+            double response = sails.Rudder != null ? HullTurn.FullHelmRate(sails.Rudder.Strength(forward), sails.Rudder.FullAngle, boat.Body.angularDrag, yawInertia) : double.NaN;
+            UpdatePhysicalCircle(yawInertia);
+            bool avoiding = Time.time < avoidUntil;
+            // A tack, a wear or the way out of irons asks the hull's full turn (the helm hard over), as a fixed full helm tacks it fastest.
+            bool manoeuvre = ironsSide != 0 || navigator != null && (navigator.State == Manoeuvre.Tacking || navigator.State == Manoeuvre.Wearing);
+            double mostRate = manoeuvre ? Math.Max(HeadingController.TurnRateMost, response > 0 ? response : 0)
+                : HeadingController.AskedRateMost(avoiding ? AvoidTurnRate : HeadingController.TurnRateMost, response, avoiding ? 1 : TurnCircle.ReserveRate);
+            helm.Demand = (float)heading.Tick(currentHeading, targetHeading, yawRate, dt, mostRate, feed, response);
+            // Vanilla reverses its yaw torque for every non-positive forward velocity, including near-zero drift.
+            if (forward <= 0) helm.Demand = -helm.Demand;
+            helm.Apply();
+            bool plainCourse = navigator != null && (navigator.State == Manoeuvre.Direct || navigator.State == Manoeuvre.CloseHauled) && !backing && !easing &&
+                ironsSide == 0 && !GivingWay && Job.dockingPhase == 0 && !Job.unberthing && forward > 0 && Time.time >= avoidUntil;
+            score.Steer(dt, plainCourse, targetHeading, error, helm.Demand, yawRate, forward);
+            if (score.Steady) scatter.Sample(error, dt);
             BalanceSails(dt, windFromNow, currentHeading, forward);
         }
 
@@ -1646,13 +1734,31 @@ namespace ShipwrightAndTransport.Sailing
             bool steady = navigator != null && (navigator.State == Manoeuvre.Direct || navigator.State == Manoeuvre.CloseHauled) && !backing && !easing &&
                 ironsSide == 0 && !GivingWay && forward > 1f && Job.dockingPhase == 0 && !Job.unberthing;
             if (!steady || dt <= 0) { balance.Reset(); return; }
-            // The helm she needs: hers when she steers, the game's rudder when she has let go (decision 132).
-            var action = balance.Sample(-TackNavigator.Side(windFrom, heading) * (helm.Released ? helm.Current : helm.Demand), dt);
+            // The helm she needs.
+            var action = balance.Sample(-TackNavigator.Side(windFrom, heading) * helm.Demand, dt);
             if (action == BalanceAction.None) return;
-            string change = sails.Balance(action == BalanceAction.LetOut ? 0 : action == BalanceAction.ReefAft ? 1 : -1);
+            // The helm held over the window, + to port: the weather helm's sign on the side the wind comes from.
+            double held = -TackNavigator.Side(windFrom, heading) * balance.WeatherHelm;
+            string change = BalanceReef(action == BalanceAction.LetOut ? 0 : action == BalanceAction.ReefAft ? 1 : -1, held, forward, out _);
             if (change != null)
-                Log.Info("Sailing: " + Name + " balances her sails (" + (balance.WeatherHelm >= 0 ? "weather" : "lee") + " helm " +
+                Log.Info("Sailing: " + Name + " balances its sails (" + (balance.WeatherHelm >= 0 ? "weather" : "lee") + " helm " +
                     Math.Abs(balance.WeatherHelm).ToString("F2") + " over " + SailBalance.Window.ToString("F0") + " s, " + forward.ToString("F2") + " m/s): " + change + ".");
+        }
+
+        // A balance reef (decisions 128, 176, 178; `order` 0 a let-out) on the helm held (+ to port, as ahead), judged at `forward`
+        // (PlanSpeedLeast at least). The first reef that finds no sail making the helm since the last change is logged.
+        private bool helmNotSailsLogged;
+        private string BalanceReef(int order, double heldHelm, float forward, out string none)
+        {
+            string done = sails.Balance(order, heldHelm, Math.Max(forward, SailControlAdapters.PlanSpeedLeast), out none);
+            if (done != null) helmNotSailsLogged = false;
+            else if (none == SailControlAdapters.HelmNotSails && !helmNotSailsLogged)
+            {
+                helmNotSailsLogged = true;
+                Log.Info("Sailing: " + Name + "'s helm " + heldHelm.ToString("F2") + " at " + forward.ToString("F2") + " m/s: " + none + " (each sail's step under " +
+                    SailControlAdapters.StepHelmLeast.ToString("F2") + " of the helm, or its turn the other way).");
+            }
+            return done;
         }
 
         private float HorizontalDistance(Vector3 a, Vector3 b) { float x = a.x - b.x, z = a.z - b.z; return Mathf.Sqrt(x * x + z * z); }
@@ -1698,6 +1804,7 @@ namespace ShipwrightAndTransport.Sailing
         // The sailor lets go (helm, sails, far travel, helmsman); her locks stay.
         private void ReleaseSailor(bool emergencyFurl)
         {
+            score.Interrupted("the sailor let go", Time.time); score.Unsteady();
             try { if (emergencyFurl) sails?.EmergencyFurlImmediate(); else sails?.StopInputs(); }
             catch (Exception e) { Log.Warn("Sailing: sail control cleanup: " + e.Message); }
             try { background?.Dispose(); } catch (Exception e) { Log.Warn("Sailing: background cleanup: " + e.Message); }
@@ -1705,7 +1812,7 @@ namespace ShipwrightAndTransport.Sailing
             try { helmsman?.Dispose(); } catch (Exception e) { Log.Warn("Sailing: helmsman cleanup: " + e.Message); }
             if (anchorWinch) GameBindings.WinchInput.SetValue(anchorWinch, 0f);
             anchorWinch = null;
-            if (navigator != null) keptTackLoss = navigator.LossPerDegree;
+            if (navigator != null) { keptTackLoss = navigator.LossPerDegree; keptWearsOnly |= navigator.WearsOnly; }
             background = null; helmsman = null; helm = null; sails = null;
             water = null; navigator = null; waterIngress = null; TakingWater = false;
             voyageIslands.Clear(); islandLeaseAt = 0; voyageDestinationPinned = false; ResetDocking();
@@ -1758,6 +1865,45 @@ namespace ShipwrightAndTransport.Sailing
         internal static bool GivesUpTurn(bool blocked, float forward, bool committedWear) => blocked && (forward > 1f || committedWear);
     }
 
+    // The kinds of fault that stop a voyage under way: something within the stopping distance, a turn that timed out or stalled, a fault
+    // of the program or the rig.
+    internal enum FaultKind { Close, Manoeuvre, Program }
+
+    // The wait after a fault. A turn's fault with open water around is recovered at once, the sail kept, Recoveries times in a row; any
+    // other fault, or one more, holds the ship furled for the next of Waits (game seconds). Both counts start afresh after QuietAfter
+    // seconds under way with no fault; the recoveries also at each hold.
+    internal sealed class FaultLadder
+    {
+        internal static readonly double[] Waits = { 20, 60, 120 };
+        internal const int Recoveries = 2;
+        internal const double QuietAfter = 120;
+        private int holds, recoveries;
+        private double quiet;
+        internal int RecoveriesInRow => recoveries;
+
+        // Under way with no fault for `dt` seconds.
+        internal void Sailing(double dt)
+        {
+            if ((quiet += dt) >= QuietAfter) holds = recoveries = 0;
+        }
+
+        // True: the fault is recovered at once; false: the ship holds for NextWait().
+        internal bool Recover(FaultKind kind, bool openWater)
+        {
+            quiet = 0;
+            if (kind != FaultKind.Manoeuvre || !openWater || recoveries >= Recoveries) return false;
+            recoveries++;
+            return true;
+        }
+
+        // The next hold's wait, the ladder climbed a rung.
+        internal double NextWait()
+        {
+            quiet = 0; recoveries = 0;
+            return Waits[Math.Min(holds++, Waits.Length - 1)];
+        }
+    }
+
     // Decision 225 (24): a fault in a voyage's tick while she waits or lies moored: logged when it is new (its message changed), and her
     // tick tried again RetrySeconds later (real time), not every physics step.
     internal sealed class TickFault
@@ -1787,6 +1933,8 @@ namespace ShipwrightAndTransport.Sailing
         private TackNavigator navigator;
         private Vector3 steeringTarget;
         private float navigationClock, departureSeconds, replanAt, giveWayUntil;
+        // The traffic the chooser's last failed traffic test met, for the log.
+        private string trafficSeen;
         // Decision 102: a boat in her way: her sails in to steerage, her course kept, full sail again once it is clear.
         internal bool GivingWay { get; private set; }
         private string navMessage;
@@ -1796,6 +1944,7 @@ namespace ShipwrightAndTransport.Sailing
         // The route as saved, replanned from where she is when its next leg is no longer clear.
         private void PrepareNavigation(float noGo)
         {
+            UpdatePhysicalCircle(HullTurn.YawInertia(boat.Body));
             var windNow = Vector3.ProjectOnPlane(Wind.currentWind, Vector3.up);
             float windFrom = (float)NavigationMath.Heading(-windNow.x, -windNow.z);
             var origin = Point(boat.StablePosition);
@@ -1813,25 +1962,26 @@ namespace ShipwrightAndTransport.Sailing
                 // longer clear: Cube_002"): she comes off the dock by the unberthing stage (decisions 110-111, the tow if need be),
                 // and her route is planned again from open water.
                 if (replacement.Length < 2 && restrained && !Job.departureComplete)
-                    Log.Info("Sailing: " + Name + ": no clear route out from her berth (" + water.Obstruction + "); she comes off the dock first.");
+                    Log.Info("Sailing: " + Name + ": no clear route out from its berth (" + water.Obstruction + "); it comes off the dock first.");
                 // In her harbour's chart her guide is the chart's (decisions 157, 198), not her route: a coarse route not found from here
                 // keeps the one she has (decision 204 c; runs 20261013-041904 and -042420, GC's retest: the Brig held once in Dragon
                 // Cliffs' basin by Cube_002, then every try to sail again threw "Saved route is no longer clear" and she never sailed again).
                 else if (replacement.Length < 2 && InHarbourChart)
-                    Log.Info("Sailing: " + Name + ": her route's next leg isn't clear from here (" + water.Obstruction + ") and no coarse route is found; in her harbour's chart " +
-                        "her chart's guide takes her on (decision 204 c).");
+                    Log.Info("Sailing: " + Name + ": its route's next leg isn't clear from here (" + water.Obstruction + ") and no coarse route is found; in its harbour's chart " +
+                        "its chart's guide takes it on (decision 204 c).");
                 // Still in her origin's harbour (decision 123's last resort; run 20261010-100003: the Cog held 105 m out, "Saved route is
                 // no longer clear: Cube"): the tow takes her all the way out, and her route is planned again from open water.
                 else if (replacement.Length < 2 && NearOriginBerth())
                 {
-                    Log.Info("Sailing: " + Name + ": no clear route from here in her origin's harbour (" + water.Obstruction + "); the tow takes her out.");
+                    Log.Info("Sailing: " + Name + ": no clear route from here in its origin's harbour (" + water.Obstruction + "); the tow takes it out.");
                     towOffs = MaximumTowOffs + 1; Job.unberthing = true; ++Job.revision;
                 }
                 else if (replacement.Length < 2) throw new InvalidOperationException("Saved route is no longer clear: " + water.Obstruction);
                 else ReplaceRoute(replacement);
             }
             double learned = navigator?.LossPerDegree ?? keptTackLoss;
-            navigator = new TackNavigator(); navigator.KeepLoss(learned); navigator.Restore(Job.tack, boat.Root.eulerAngles.y, ApparentFrom(), DeadZone);
+            keptWearsOnly |= navigator?.WearsOnly ?? false;
+            navigator = new TackNavigator(); navigator.KeepLoss(learned); navigator.KeepWearsOnly(keptWearsOnly); navigator.Restore(Job.tack, boat.Root.eulerAngles.y, ApparentFrom(), DeadZone);
             // Little way on (back from far travel, or a retry after a hold): time to set her sails and gather way.
             if (boat.Body && boat.Body.velocity.magnitude < 1f) navigator.GatherWay(45);
             navigationClock = 1; departureSeconds = 0; replanAt = 0; giveWayUntil = 0; GivingWay = false;
@@ -1901,8 +2051,8 @@ namespace ShipwrightAndTransport.Sailing
                 if (BerthApproach.Turn(other, hers, near))
                 {
                     var oldApproach = NavigationDestination0(hersAt);
-                    Log.Info("Sailing: " + Name + " will lie the other way round at her berth (decision 143), " + WayRound(otherHeading) + ": from that end " +
-                        EndReport(other, otherAt) + "; from the end she had " + EndReport(hers, hersAt) + (hersClear ? "" : " (" + hersWhy + ")") +
+                    Log.Info("Sailing: " + Name + " will lie the other way round at its berth (decision 143), " + WayRound(otherHeading) + ": from that end " +
+                        EndReport(other, otherAt) + "; from the end it had " + EndReport(hers, hersAt) + (hersClear ? "" : " (" + hersWhy + ")") +
                         "; the wind from " + windFrom.ToString("F0") + ", close-hauled " + closeHauled.ToString("F0") + " off it.");
                     Job.dockHeading = (float)otherHeading; ++Job.revision;
                     hersAt = otherAt; hersClear = otherClear; hersWhy = otherWhy;
@@ -1916,14 +2066,14 @@ namespace ShipwrightAndTransport.Sailing
             {
                 // Decision 146: never a silent unchecked point. She holds off ("no route to her approach point") while none is clear.
                 if (!approachNoneLogged)
-                    Log.Info("Sailing: " + Name + ": no clear approach point at either end of her berth, out to " + BerthApproach.Further(HullLength).Last().ToString("F0") +
-                        " m (" + hersWhy + "); she looks again every " + ApproachRetrySeconds.ToString("F0") + " s.");
+                    Log.Info("Sailing: " + Name + ": no clear approach point at either end of its berth, out to " + BerthApproach.Further(HullLength).Last().ToString("F0") +
+                        " m (" + hersWhy + "); it looks again every " + ApproachRetrySeconds.ToString("F0") + " s.");
                 approachNoneLogged = true;
                 approachCheckedAt = Time.time - ApproachCheckSeconds + ApproachRetrySeconds;
             }
             else approachNoneLogged = false;
             if (Math.Abs(hersAt - approachDistance) > 0.5f)
-                Log.Info("Sailing: " + Name + "'s approach point lies " + hersAt.ToString("F0") + " m out along her berth, " + WayRound(Job.dockHeading) +
+                Log.Info("Sailing: " + Name + "'s approach point lies " + hersAt.ToString("F0") + " m out along its berth, " + WayRound(Job.dockHeading) +
                     (hersClear ? "" : " (not clear: " + hersWhy + ")") + ".");
             approachDistance = hersAt;
             return hersAt;
@@ -1955,7 +2105,7 @@ namespace ShipwrightAndTransport.Sailing
                 var a = Ahead(Job.destination, heading + 180, d);
                 if (charted && !chart.HullRoom(a, heading, axis, room, length, depth, out string tight))
                 {
-                    why = why ?? "at " + d.ToString("F0") + " m her hull or her run-in lacks her line's room (decision 201 a: " + tight + ")";
+                    why = why ?? "at " + d.ToString("F0") + " m its hull or its run-in lacks its line's room (decision 201 a: " + tight + ")";
                     continue;
                 }
                 // The point clear water, and her run from it to the berth clear for her hull (run 20261011-041505: a Leopard lying across
@@ -1971,24 +2121,32 @@ namespace ShipwrightAndTransport.Sailing
         // at Kicia Bay's tow start, her bow toward its channel.
         private string WayRound(double heading)
         {
-            if (ArrivalOneWay) return "her bow toward Kicia Bay's channel, at " + NavigationMath.Normalize(heading).ToString("F0");
-            if (!arrivalSpotKnown) return "her bow at " + NavigationMath.Normalize(heading).ToString("F0");
+            if (ArrivalOneWay) return "its bow toward Kicia Bay's channel, at " + NavigationMath.Normalize(heading).ToString("F0");
+            if (!arrivalSpotKnown) return "its bow at " + NavigationMath.Normalize(heading).ToString("F0");
             return Math.Abs(NavigationMath.Delta(arrivalYaw, heading)) < 90 ? "as the game puts a ship there" : "the other way round from how the game puts a ship there";
         }
 
         private static string EndReport(BerthApproach.End end, float at) =>
             (end.Clear ? "a clear approach point " + at.ToString("F0") + " m out" : "no clear approach point") +
-            ", the wind " + (end.Wind == 0 ? "across her way in" : end.Wind == 1 ? "behind her (a run in)" : "too far ahead to sail in") +
-            ", " + end.WayIn.ToString("F0") + " m from her";
+            ", the wind " + (end.Wind == 0 ? "across its way in" : end.Wind == 1 ? "behind it (a run in)" : "too far ahead to sail in") +
+            ", " + end.WayIn.ToString("F0") + " m from it";
+
+        private float sceneWaitSince = -1;
 
         private bool NavigateTick(float dt)
         {
             EnsureVoyageScenes();
             if (GameState.loadingScenes > 0)
             {
+                if (sceneWaitSince < 0) sceneWaitSince = Time.time;
                 HoldNavigation(dt, Job.dockingPhase == 2 ? 0 : .15f);
                 Status.Phase = TransportPhase.Suspended; Status.Message = "Waiting for island geometry to finish loading.";
                 return false;
+            }
+            if (sceneWaitSince >= 0)
+            {
+                Log.Info("Sailing: " + Name + " waited " + (Time.time - sceneWaitSince).ToString("F1") + " s for island scenes to load (its sail at 15 %, the helm centred).");
+                sceneWaitSince = -1;
             }
             // Decision 157: her harbour charted before she leaves it (and again after a load while she is still in it).
             var at = Point(boat.StablePosition);
@@ -2003,7 +2161,7 @@ namespace ShipwrightAndTransport.Sailing
             {
                 seabedWait = true;
                 HoldNavigation(dt, 0);
-                Status.Message = "Waiting until the player is near enough to chart her harbour.";
+                Status.Message = "Waiting until the player is near enough to chart its harbour.";
                 return false;
             }
             // Decision 198 (b, j): her line searched a slice a frame.
@@ -2041,22 +2199,22 @@ namespace ShipwrightAndTransport.Sailing
                 double toRoute = NavigationMath.Heading(first.x - here.x, first.z - here.z), bowNow = boat.Root.eulerAngles.y;
                 if (pinned == null && straightOut && RoutePoint.Distance(here, first) > 1 && Math.Abs(NavigationMath.Delta(bowNow, toRoute)) > RouteTurnFree &&
                     !water.TurnClear(here, bowNow, toRoute))
-                    pinned = "her route lies " + NavigationMath.Delta(bowNow, toRoute).ToString("F0") + " degrees off her bow, a turn she can't make alongside (" + water.Obstruction + ")";
+                    pinned = "its route lies " + NavigationMath.Delta(bowNow, toRoute).ToString("F0") + " degrees off its bow, a turn it can't make alongside (" + water.Obstruction + ")";
                 Log.Info("Sailing: " + Name + " casts off: " + StuckReport());
                 // Decision 225 (7): the stage marked before it starts, so a stage that ends at once (nothing alongside: FinishUnberthing,
                 // its own "left her berth") stays ended; it was set again after it, and the stage ran twice.
                 // Decision 220: at Kicia Bay always by the stage, which tows her out of its channel.
                 bool towOut = TowOutPending, unberth = !straightOut || pinned != null || towOut;
                 Job.departureComplete = true; Job.unberthing = unberth; ++Job.revision;
-                if (unberth) BeginUnberthing(towOut ? "Kicia Bay's tow out of its channel (decision 220)" : !straightOut ? "her way ahead is blocked (" + water.Obstruction + ")" : pinned);
+                if (unberth) BeginUnberthing(towOut ? "Kicia Bay's tow out of its channel (decision 220)" : !straightOut ? "its way ahead is blocked (" + water.Obstruction + ")" : pinned);
                 boat.Moorings.UnmoorAllRopes();
                 GameBindings.WinchInput.SetValue(anchorWinch, 0f);
                 tickClock = 0.5f;
                 Status.Phase = TransportPhase.Sailing;
                 if (!unberth)
                 {
-                    sails.Plan((float)heel.Deployment, false);
-                    Log.Info("Sailing: " + Name + " left her berth: anchor recovered, moorings released, full-sail target set.");
+                    sails.Plan((float)heel.Deployment);
+                    Log.Info("Sailing: " + Name + " left its berth: anchor recovered, moorings released, full-sail target set.");
                 }
             }
             if (Job.unberthing) { GivingWay = false; return UnberthTick(dt); }
@@ -2076,11 +2234,18 @@ namespace ShipwrightAndTransport.Sailing
             // before she anchors, she goes straight in (the user, 2026-11-04).
             if (Job.anchorStage == 0 && AnchorLegOpen && chartArriving && (chartDone || chartNone)) SkipAnchor();
             if (Job.anchorStage == 1 && AnchorLegOpen) return AnchorTick(dt);
+            if (approachAgain && RoutePoint.Distance(p, NavigationDestination()) > ApproachAgainLengths * Math.Max(10, water.Length)) approachAgain = false;
+            // Near the release spot with a clear, sailable way straight to it: the final approach aimed along that way.
+            if (harbour && Job.dockingPhase == 0)
+            {
+                double straight = StraightInTo(p);
+                if (NavigationMath.Finite(straight)) { line = null; linePlanner = null; return BeginFinalApproach(dt, straight); }
+            }
             // Decision 198 (h): near her approach point in her destination's chart, at her line in's end: her final approach.
             if (harbour && Job.dockingPhase == 0 && ArrivalApproachReached(p))
             {
-                Log.Info("Sailing: " + Name + " is at her approach point (" + RoutePoint.Distance(p, NavigationDestination()).ToString("F0") + " m off it" + (line != null ? ", her line in at " +
-                    line[lineAt].Along.ToString("F0") + " of " + line[line.Count - 1].Along.ToString("F0") + " m" : "") + "): her final approach (decision 198 h).");
+                Log.Info("Sailing: " + Name + " is at its approach point (" + RoutePoint.Distance(p, NavigationDestination()).ToString("F0") + " m off it" + (line != null ? ", its line in at " +
+                    line[lineAt].Along.ToString("F0") + " of " + line[line.Count - 1].Along.ToString("F0") + " m" : "") + "): its final approach (decision 198 h).");
                 line = null; linePlanner = null;
                 return BeginFinalApproach(dt);
             }
@@ -2100,7 +2265,7 @@ namespace ShipwrightAndTransport.Sailing
             // Already by her berth (run 20261011-010840: the approach point lay 100 m beyond it, and she circled 5-80 m off the berth for
             // minutes trying to reach it): inside the approach distance, within BerthTakeAlign of the berth's heading with the berth
             // ahead of her, and slow, she takes the berth from where she is (the final approach, NavigateDocking).
-            if (!lastReached && Job.berthKnown && Job.dockingPhase == 0 && !AnchorLegOpen)
+            if (!lastReached && Job.berthKnown && Job.dockingPhase == 0 && !AnchorLegOpen && !approachAgain)
             {
                 var fwd = Quaternion.Euler(0, Job.dockHeading, 0) * Vector3.forward;
                 float ahead = Vector3.Dot(Vector(Job.destination) - boat.StablePosition, fwd);
@@ -2110,8 +2275,8 @@ namespace ShipwrightAndTransport.Sailing
                 if (!turningNow0 && DistanceToTarget() < RoutePoint.Distance(NavigationDestination(), Job.destination) && ahead > 0 && speedNow < BerthTakeSpeed &&
                     Mathf.Abs(Mathf.DeltaAngle(boat.Root.eulerAngles.y, Job.dockHeading)) <= BerthTakeAlign)
                 {
-                    Log.Info("Sailing: " + Name + " takes her berth from here: " + DistanceToTarget().ToString("F0") + " m off it, " + speedNow.ToString("F1") +
-                        " m/s, her heading " + Mathf.DeltaAngle(Job.dockHeading, boat.Root.eulerAngles.y).ToString("F0") + " degrees off the berth's.");
+                    Log.Info("Sailing: " + Name + " takes its berth from here: " + DistanceToTarget().ToString("F0") + " m off it, " + speedNow.ToString("F1") +
+                        " m/s, its heading " + Mathf.DeltaAngle(Job.dockHeading, boat.Root.eulerAngles.y).ToString("F0") + " degrees off the berth's.");
                     return BeginFinalApproach(dt);
                 }
             }
@@ -2151,14 +2316,14 @@ namespace ShipwrightAndTransport.Sailing
                                 var joined = new System.Collections.Generic.List<RoutePoint>(outer);
                                 for (int i = 1; i < inner.Length; i++) joined.Add(inner[i]);
                                 next = joined.ToArray();
-                                Log.Info("Sailing: " + Name + ": her way in to her approach point through a staging point " + r.ToString("F0") + " m off it.");
+                                Log.Info("Sailing: " + Name + ": its way in to its approach point through a staging point " + r.ToString("F0") + " m off it.");
                             }
                             if (next.Length >= 2) break;
                         }
                     if (next.Length < 2)
                     {
                         if (!approachObstructedLogged)
-                            Log.Info("Sailing: " + Name + ": no route to her approach point " + RoutePoint.Distance(p, nextGoal).ToString("F0") + " m off (" + water.Obstruction + "; its route searches took " + planClock.ElapsedMilliseconds + " ms).");
+                            Log.Info("Sailing: " + Name + ": no route to its approach point " + RoutePoint.Distance(p, nextGoal).ToString("F0") + " m off (" + water.Obstruction + "; its route searches took " + planClock.ElapsedMilliseconds + " ms).");
                         approachObstructedLogged = true;
                         HoldNavigation(dt, 0); Status.Message = "Destination approach obstructed (" + water.Obstruction + "); retaining voyage."; return false;
                     }
@@ -2186,6 +2351,21 @@ namespace ShipwrightAndTransport.Sailing
             float stopFloor = Mathf.Max(water.Length, speed * StopSeconds);
             if (lookScale < 1f && Time.time >= lookScaleUntil) lookScale = 1f;
             float look = Mathf.Max(stopFloor, Look(speed) * lookScale);
+            // On the harbour line's beat, its boards and tacks judged over the room the line was planned with (BeatLook).
+            if (harbour && line != null && NavigationMath.Finite(lineBeatRoom))
+            {
+                double tackRoom = LinePlanner.TackRoom(chart.NarrowClearance, Math.Max(10, water.Length));
+                float beatLook = (float)BeatLook(look, stopFloor, tackRoom, lineBeatRoom);
+                if (beatLook < look - 0.5f && !beatLookNoted)
+                {
+                    beatLookNoted = true;
+                    Log.Info("Sailing: " + Name + " beats up its line (stage 34 l): its boards and tacks judged over " + beatLook.ToString("F0") + " m (the room to tack the line was planned with, " +
+                        tackRoom.ToString("F0") + " m, and its stopping distance, " + stopFloor.ToString("F0") + " m; the line's water " + lineBeatRoom.ToString("F0") + " m clear), not its look-ahead of " +
+                        look.ToString("F0") + " m.");
+                }
+                look = beatLook;
+            }
+            else beatLookNoted = false;
             bool turningNow = navigator.State == Manoeuvre.Tacking || navigator.State == Manoeuvre.Wearing;
             // Decision 125: her routes chosen by the wind she has: at her departure (here when she needed no unberthing stage; else
             // EnterTurn), and after a wind shift of over RouteWindShift within RouteHarbour of her origin berth.
@@ -2193,16 +2373,16 @@ namespace ShipwrightAndTransport.Sailing
             if (!departureRouteChosen)
             {
                 departureRouteChosen = true;
-                if (Time.time >= routeChoiceAt && ChooseRoute("her departure"))
+                if (Time.time >= routeChoiceAt && ChooseRoute("its departure"))
                 { waypoint = Job.route[Job.waypoint]; navigator.Restore(Job.tack, boat.Root.eulerAngles.y, apparentFrom, deadZone); }
             }
             else if (!harbour && !turningNow && !double.IsNaN(routeWind) && Time.time >= routeChoiceAt && NearOriginHarbour() &&
                 Math.Abs(NavigationMath.Delta(routeWind, windFrom)) > RouteWindShift)
             {
-                if (ChooseRoute("the wind shifted " + Math.Abs(NavigationMath.Delta(routeWind, windFrom)).ToString("F0") + " degrees in her origin's harbour"))
+                if (ChooseRoute("the wind shifted " + Math.Abs(NavigationMath.Delta(routeWind, windFrom)).ToString("F0") + " degrees in its origin's harbour"))
                 { waypoint = Job.route[Job.waypoint]; navigator.Restore(Job.tack, boat.Root.eulerAngles.y, apparentFrom, deadZone); }
             }
-            // Land and lying boats choose her course; moving traffic never does (decision 102): she gives way to it below.
+            // Land and lying boats decide whether her guide point is in clear water; moving traffic is weighed in her courses (Traffic).
             bool routeClear = water.Clear(p, waypoint);
             // Decision 162: in her harbour's chart, her guide out of a clear line from her is chosen again at once, not after its 2 s (run
             // 20261011-150902 on DY: coming up to Dragon Cliffs' narrow north gap off its middle, the line to her guide beyond the gap
@@ -2224,7 +2404,7 @@ namespace ShipwrightAndTransport.Sailing
             {
                 replanAt = Time.time + 8;
                 var route = RoutePlanner.Plan(p, water.ChartGoal(p, NavigationDestination()), water.Clear, windFrom, noGo);
-                if (route.Length >= 2) { ReplaceRoute(route); waypoint = route[1]; direct = water.Clear(p, waypoint); navigator.Rechoose("her route was planned again (" + water.Obstruction + ")"); }
+                if (route.Length >= 2) { ReplaceRoute(route); waypoint = route[1]; direct = water.Clear(p, waypoint); navigator.Rechoose("its route was planned again (" + water.Obstruction + ")"); }
             }
             double bearing = NavigationMath.Heading(waypoint.x - p.x, waypoint.z - p.z);
             // Decision 153: the limit she sails at, chosen from her set-up scan by her way made good toward her guide point (every
@@ -2250,21 +2430,28 @@ namespace ShipwrightAndTransport.Sailing
                         double h = NavigationMath.Normalize(apparentFrom + off);
                         return water.TurnClear(p, headingThen, h) && WayClear(p, h, Mathf.Max(look, HarbourLimitLengths * water.Length), bearingThen, guideThen);
                     };
+                // Angles off the apparent wind now; a heading on the side of it the bow isn't on, by the apparent wind the ship would feel there.
+                var sidesWind = new HeadingWind(0, NavigationMath.Delta(apparentFrom, windFrom), wind.magnitude, TackNavigator.ExpectedSpeed(forward), side);
+                // Each limit at the speed its own sails would make, scaled from full-sail sailing (SailControlAdapters.JudgePerUnit); on the
+                // harbour line, by the stretch the hold covers.
+                var judge = new UpwindLimits.SpeedJudge(sidesWind.True, wind.magnitude, sails.JudgePerUnit(forward, NavigationMath.Delta(apparentFrom, headingThen)));
+                bool stretched = harbour && line != null && LineStretch(apparentFrom, LimitHold * TackNavigator.ExpectedSpeed(forward));
                 string chose = sails.ChooseLimit(NavigationMath.Delta(apparentFrom, bearing), off =>
                 {
                     double h = NavigationMath.Normalize(apparentFrom + off);
                     return water.TurnClear(p, headingThen, h) && WayClear(p, h, look, bearingThen, guideThen);
-                }, Time.time < limitHeldUntil, side, far);
+                }, Time.time < limitHeldUntil, side, far, sidesWind, judge, stretched ? stretchHeadings : null, stretched ? stretchLengths : null);
                 if (chose != null)
                 {
                     limitHeldUntil = Time.time + LimitHold;
                     Log.Info("Sailing: " + Name + " " + chose + " (decision 153).");
                     deadZone = DeadZone;
                     if (Math.Abs(NavigationMath.Delta(apparentFrom, navigator.CourseHeading)) < TackNavigator.BeatOff(deadZone, Margin))
-                        navigator.Rechoose("the angle her sails can sail at changed");
+                        navigator.Rechoose("the angle its sails can sail at changed");
                 }
             }
-            string setChange = sails.UpdateSet(NavigationMath.Delta(apparentFrom, boat.Root.eulerAngles.y));
+            string setChange = sails.UpdateSet(NavigationMath.Delta(apparentFrom, boat.Root.eulerAngles.y), NavigationMath.Delta(apparentFrom, windFrom), wind.magnitude, forward,
+                sails.InPort && harbour && line != null);
             if (setChange != null) Log.Info("Sailing: " + Name + ": " + setChange + " (decision 153).");
             var oldManoeuvre = navigator.State;
             // Decision 133: her sails draw when the apparent wind is outside her least angle to it.
@@ -2272,24 +2459,33 @@ namespace ShipwrightAndTransport.Sailing
             navigator.BearingAway = easing;
             // Decision 209 (d): on her line, straight at her guide on it comes first.
             bool onLineNow = harbour && line != null;
-            if (onLineNow != navigator.OnLine) { navigator.OnLine = onLineNow; if (onLineNow) navigator.Rechoose("she is on her line (decision 209 d)"); }
+            if (onLineNow != navigator.OnLine) { navigator.OnLine = onLineNow; if (onLineNow) navigator.Rechoose("it is on its line (decision 209 d)"); }
             // A heading counts as clear when her turn to it where she lies is (her hull's swing, the seabed under her bow and stern:
-            // the user, 2026-10-11) and her way along it is.
+            // the user, 2026-10-11) and her way along it is; a heading across the wind's eye (a tack) by TackWayClear instead.
             double headingNow = boat.Root.eulerAngles.y;
-            double demand = navigator.Tick(headingNow, bearing, apparentFrom, deadZone, forward, elapsed, direct, h => water.TurnClear(p, headingNow, h) && WayClear(p, h, look, bearing, waypoint));
+            navigator.TrueWind(windFrom, wind.magnitude);
+            // The hull's tack judged at a tacking speed; whether it has that speed now is CanTack's.
+            navigator.FullHelmTurn = FullHelmTurnAt(Math.Max(forward, TackNavigator.PlanTackSpeed));
+            // A heading's way is clear of moving traffic when the hulls are predicted to stay TrafficMargin apart along it.
+            navigator.Traffic = h => { if (water.MovingClear(p, Ahead(p, h, look), h)) return true; trafficSeen = water.Obstruction; return false; };
+            double demand = navigator.Tick(headingNow, bearing, apparentFrom, deadZone, forward, elapsed, direct, h => TackNavigator.CrossesEye(headingNow, h, apparentFrom)
+                ? TackWayClear(p, forward, headingNow, h, apparentFrom, look) : water.TurnClear(p, headingNow, h) && WayClear(p, h, look, bearing, waypoint));
+            score.Navigate(navigator.State, navigator.TackCount, Time.time, forward, NavigationMath.Delta(windFrom, bearing), NavigationMath.Delta(windFrom, headingNow));
             if (navigator.LossLearned != null)
-                Log.Info("Sailing: " + Name + "'s tack lost " + navigator.LossLearned + " (decision 161: the speed she needs to tack).");
+                Log.Info("Sailing: " + Name + "'s tack lost " + navigator.LossLearned + " (decision 161: the speed it needs to tack).");
             if (navigator.TackAborted != null)
-                Log.Info("Sailing: " + Name + " gives up her tack (decision 133: " + navigator.TackAborted + "); back on her old tack to gather way.");
+                Log.Info("Sailing: " + Name + " gives up its tack (decision 133: " + navigator.TackAborted + "); back on its old tack to gather way.");
             if (navigator.Chose)
-                Log.Info("Sailing: " + Name + " chooses her course (" + navigator.Choice + "); the apparent wind from " + apparentFrom.ToString("F0") + " (her dead zone " +
+                Log.Info("Sailing: " + Name + " chooses its course (" + navigator.Choice + "); the apparent wind from " + apparentFrom.ToString("F0") + " (its dead zone " +
                     deadZone.ToString("F0") + ", close-hauled " + TackNavigator.BeatOff(deadZone, Margin).ToString("F0") + " off it), the true wind from " + windFrom.ToString("F0") + " at " +
                     wind.magnitude.ToString("F1") + " m/s, " + forward.ToString("F2") + " m/s ahead, heading " + boat.Root.eulerAngles.y.ToString("F0") +
-                    ", her guide point (waypoint " + Job.waypoint + ") " + RoutePoint.Distance(p, waypoint).ToString("F0") + " m off at " + bearing.ToString("F0") + ".");
+                    ", its guide point (waypoint " + Job.waypoint + ") " + RoutePoint.Distance(p, waypoint).ToString("F0") + " m off at " + bearing.ToString("F0") + ".");
+            if (navigator.Chose && navigator.TrafficSteered)
+                Log.Info("Sailing: " + Name + " steers round moving traffic, heading " + navigator.CourseHeading.ToString("F0") + ": " + trafficSeen + ".");
             if (navigator.GatherBegan)
-                Log.Info("Sailing: " + Name + " gathers way on heading " + navigator.GatherHeading.ToString("F0") + " (decision 131: her sail draws there, the apparent wind " +
-                    Math.Abs(NavigationMath.Delta(apparentFrom, navigator.GatherHeading)).ToString("F0") + " degrees off; " + forward.ToString("F2") + " m/s ahead; her guide point " +
-                    NavigationMath.Delta(boat.Root.eulerAngles.y, bearing).ToString("F0") + " degrees off her bow waits).");
+                Log.Info("Sailing: " + Name + " gathers way on heading " + navigator.GatherHeading.ToString("F0") + " (decision 131: its sail draws there, the apparent wind " +
+                    Math.Abs(NavigationMath.Delta(apparentFrom, navigator.GatherHeading)).ToString("F0") + " degrees off; " + forward.ToString("F2") + " m/s ahead; its guide point " +
+                    NavigationMath.Delta(boat.Root.eulerAngles.y, bearing).ToString("F0") + " degrees off its bow waits).");
             if (navigator.GatherEnded != null)
                 Log.Info("Sailing: " + Name + " ends gathering way: " + navigator.GatherEnded + "; heading " + boat.Root.eulerAngles.y.ToString("F0") + ", " + forward.ToString("F2") + " m/s ahead.");
             Job.tack = navigator.Tack; Job.deployment = (float)heel.Deployment;
@@ -2300,7 +2496,7 @@ namespace ShipwrightAndTransport.Sailing
             if (oldManoeuvre != navigator.State) TraceFor(30);
             if (oldManoeuvre != navigator.State)
                 Log.Info("Sailing: " + Name + ": " + navMessage + " (heading " + boat.Root.eulerAngles.y.ToString("F0") + ", the apparent wind " +
-                    NavigationMath.Delta(boat.Root.eulerAngles.y, apparentFrom).ToString("F0") + " degrees off her bow, " + forward.ToString("F2") + " m/s ahead, to her waypoint " +
+                    NavigationMath.Delta(boat.Root.eulerAngles.y, apparentFrom).ToString("F0") + " degrees off its bow, " + forward.ToString("F2") + " m/s ahead, to its waypoint " +
                     NavigationMath.Delta(boat.Root.eulerAngles.y, bearing).ToString("F0") + " degrees off, demand " + demand.ToString("F0") + ")");
             // Decision 160 (the user, 2026-10-11: "do both"): in her harbour's chart, too slow to tack, a square rig backs round where she
             // lies instead of wearing (run 20261011-140306: at 2.5 m/s the Cog wore 230 degrees down the wind, away from Dragon Cliffs'
@@ -2308,14 +2504,14 @@ namespace ShipwrightAndTransport.Sailing
             // new tack, as the tack she is too slow for would (DV; DU's box-haul away from the wind wore her forward down it). She wears as
             // before when she can't back.
             if (navigator.WearBegan && InHarbourChart && !navigator.CanTack(forward, boat.Root.eulerAngles.y, apparentFrom) &&
-                TryBacking("decision 160: in her harbour, too slow to tack (" + forward.ToString("F1") + " m/s), instead of a wear: " + navigator.Reason, p, bearing, apparentFrom, deadZone, look, true))
+                TryBacking("decision 160: in its harbour, too slow to tack (" + forward.ToString("F1") + " m/s), instead of a wear: " + navigator.Reason, p, bearing, apparentFrom, deadZone, look, true))
                 return true;
             // Decision 169: blocked with way on and her heading's way blocked within her stopping distance, she doesn't hold that heading
             // while she looks nearer (run 20261011-173145 on EK: at 3.1 m/s her guide fell to 8 m off in her no-go, nothing made way,
             // and she held heading 354 onto Cube at 3.1 m/s): hemmed in now.
             if (navigator.State == Manoeuvre.Blocked && forward > TurnLateSpeed && !water.Clear(p, Ahead(p, boat.Root.eulerAngles.y, stopFloor)))
             {
-                string fast = navigator.Reason + " Her way ahead blocked within her stopping distance, " + stopFloor.ToString("F0") + " m at " + forward.ToString("F1") +
+                string fast = navigator.Reason + " Its way ahead blocked within its stopping distance, " + stopFloor.ToString("F0") + " m at " + forward.ToString("F1") +
                     " m/s (decision 169): " + water.Obstruction;
                 if (TryBacking(fast, p, bearing, apparentFrom, deadZone, look)) return true;
                 HemmedIn(fast); return false;
@@ -2326,27 +2522,33 @@ namespace ShipwrightAndTransport.Sailing
                 // guide point 42 m off, every heading blocked within 65 m): she looks nearer, half as far, down to her stopping distance,
                 // for LookNearerSeconds, before her routes are chosen again or she is hemmed in.
                 lookScale = Mathf.Max(0.01f, lookScale * 0.5f); lookScaleUntil = Time.time + LookNearerSeconds;
-                Log.Info("Sailing: " + Name + " finds nothing clear within " + look.ToString("F0") + " m (" + water.Obstruction + "); she looks nearer, " +
+                Log.Info("Sailing: " + Name + " finds nothing clear within " + look.ToString("F0") + " m (" + water.Obstruction + "); it looks nearer, " +
                     Mathf.Max(stopFloor, Look(speed) * lookScale).ToString("F0") + " m.");
                 navigator.Restore(Job.tack, boat.Root.eulerAngles.y, apparentFrom, deadZone);
                 return true;
             }
             if (navigator.State == Manoeuvre.Blocked)
             {
+                if (navigator.TurnFailed && RecoverTurn(p, apparentFrom, forward, look, bearing, waypoint)) return true;
                 // Decision 125: no clear, sailable course makes way toward her guide point: her routes are chosen again (at most once
                 // a minute); only when none serves her better, hemmed in (near her origin berth the unberthing stage and its short
                 // tow, decision 123; elsewhere a hold, D6).
-                if (!harbour && navigator.NoWay && Time.time >= routeChoiceAt && ChooseRoute("no course makes way toward her guide point", true))
+                if (!harbour && navigator.NoWay && Time.time >= routeChoiceAt && ChooseRoute("no course makes way toward its guide point", true))
                 { navigator.Restore(Job.tack, boat.Root.eulerAngles.y, apparentFrom, deadZone); return true; }
                 // Decision 155: a square rig backs round where she lies before the old way.
                 string hemmed = navigator.Reason + " " + water.Obstruction;
                 if (TryBacking(hemmed, p, bearing, apparentFrom, deadZone, look)) return true;
-                HemmedIn(hemmed); return false;
+                // Arriving with no way in it can sail (the wind on its nose in narrow water): from the hold after ArrivalNoWayHolds the tow
+                // takes it in to the release spot from where it lies, as at Kicia Bay.
+                if (chartArriving && navigator.NoWay && !arrivalTowGivenUp && (arrivalSpotKnown || (arrivalSpotKnown = ReadArrivalSpot() && !noArrivalSpot)) &&
+                    ++arrivalNoWay > ArrivalNoWayHolds)
+                { BeginArrivalTow("no sailable way in from where it lies (" + hemmed + ")"); return false; }
+                HemmedIn(hemmed, navigator.TurnFailed ? FaultKind.Manoeuvre : FaultKind.Close); return false;
             }
             // Keeping clear with no way toward her guide point (the user, 2026-10-11: she steers clear rather than holding): her routes
             // are chosen again meanwhile, at most once a minute.
-            if (!harbour && navigator.NoWay && Time.time >= routeChoiceAt && ChooseRoute("keeping clear, no course makes way toward her guide point", true))
-            { waypoint = Job.route[Job.waypoint]; navigator.Rechoose("her route was chosen again"); }
+            if (!harbour && navigator.NoWay && Time.time >= routeChoiceAt && ChooseRoute("keeping clear, no course makes way toward its guide point", true))
+            { waypoint = Job.route[Job.waypoint]; navigator.Rechoose("its route was chosen again"); }
             // What lies ahead (the user, 2026-10-11: "you should not reef when you detect obstacle, instead change course to avoid it";
             // "consider your own speed, then have a safety distance according to that"): her heading's way blocked within her safety
             // distance (Look: SafetySeconds of her speed) makes the navigator choose a clear heading (its own check of her demand's
@@ -2380,9 +2582,9 @@ namespace ShipwrightAndTransport.Sailing
                 }
                 if (!WayClear(p, course, look, bearing, waypoint) && !turningNow)
                 {
-                    if (!aheadLogged) Log.Info("Sailing: " + Name + " has something ahead within " + look.ToString("F0") + " m (" + water.Obstruction + "); she keeps clear of it.");
+                    if (!aheadLogged) Log.Info("Sailing: " + Name + " has something ahead within " + look.ToString("F0") + " m (" + water.Obstruction + "); it keeps clear of it.");
                     aheadLogged = true;
-                    navigator.Rechoose("her way ahead closes (" + water.Obstruction + ")");
+                    navigator.Rechoose("its way ahead closes (" + water.Obstruction + ")");
                 }
             }
             else aheadLogged = false;
@@ -2394,20 +2596,38 @@ namespace ShipwrightAndTransport.Sailing
             // A tack's helm is led just across the wind's eye (decision 167): its way is her new course's.
             double turnWay = navigator.State == Manoeuvre.Tacking ? navigator.CourseHeading : demand;
             // Decision 172: a wear's way is its arc round her turning circle, not a straight line `look` along her helm's lead.
-            bool turnBlocked = navigator.State == Manoeuvre.Wearing ? !WearArcClear(p, forward, demand) :
-                navigator.State == Manoeuvre.Tacking && (!TackArcClear(p, forward, apparentFrom) || !water.Clear(p, Ahead(p, turnWay, look)));
-            if (GivesUpTurn(turnBlocked, forward, navigator.CommittedWear))
+            // `blockedBy`: the check of the turn that failed, for the log.
+            string blockedBy = null;
+            if (navigator.State == Manoeuvre.Wearing) { if (!WearArcClear(p, forward, demand)) blockedBy = "its arc round the turning circle (radius " + MyTurnRadius().ToString("F0") + " m)"; }
+            else if (navigator.State == Manoeuvre.Tacking)
             {
-                Log.Info("Sailing: " + Name + " gives up her " + (navigator.State == Manoeuvre.Wearing ? "wear" : "tack") + ": its way is blocked (" + water.Obstruction + "); she keeps clear.");
-                bool wasWearing = navigator.State == Manoeuvre.Wearing;
-                navigator.Interrupt("her turn's way is blocked (" + water.Obstruction + ")");
-                // Decision 155: no room to wear and too slow to tack: a square rig backs round where she lies.
-                if (wasWearing && !navigator.CanTack(forward, boat.Root.eulerAngles.y, apparentFrom) && TryBacking("her wear's way is blocked and she is too slow to tack (" + forward.ToString("F1") + " m/s)", p, bearing, apparentFrom, deadZone, look))
+                if (!TackArcClear(p, forward, apparentFrom))
+                {
+                    double h = boat.Root.eulerAngles.y;
+                    blockedBy = "its arc round the turning circle (radius " + MyTurnRadius().ToString("F0") + " m, " +
+                        Math.Min(WearArcMost, TurnLeft(h, turnWay, TackNavigator.TackTurnSign(apparentFrom, turnWay))).ToString("F0") + " degrees to go to " + turnWay.ToString("F0") + ")";
+                }
+                else
+                {
+                    var end = TackEnd(p, boat.Root.eulerAngles.y, turnWay, TackNavigator.TackTurnSign(apparentFrom, turnWay), MyTurnRadius());
+                    if (!water.Clear(end, Ahead(end, turnWay, look))) blockedBy = "the way " + look.ToString("F0") + " m along its course " + turnWay.ToString("F0") + " from where the tack leaves the ship";
+                }
+            }
+            if (GivesUpTurn(blockedBy != null, forward, navigator.CommittedWear))
+            {
+                string turn = navigator.State == Manoeuvre.Wearing ? "wear" : "tack";
+                Log.Info("Sailing: " + Name + " gives up its " + turn + ": " + blockedBy + " is blocked (" + water.Obstruction + "); it keeps clear.");
+                navigator.Interrupt("the turn's way is blocked (" + water.Obstruction + ")");
+                // Decision 155: a turn given up with too little speed to tack: a square rig backs round where it lies.
+                if (!navigator.CanTack(forward, boat.Root.eulerAngles.y, apparentFrom) && TryBacking("its " + turn + "'s way is blocked and it is too slow to tack (" + forward.ToString("F1") + " m/s)", p, bearing, apparentFrom, deadZone, look))
                     return true;
             }
-            // Decision 102: a boat predicted across her way (on her velocity, or her intended course): she gives way, her sails in
-            // to steerage (Steer), her course kept; full sail again 3 s after it is clear. No hold, no furl.
-            if (!water.VelocityTrafficClear(p) || !water.MovingClear(p, Ahead(p, demand, look)))
+            // A boat predicted to come within TrafficMargin (on her velocity, or her course) is passed by her course where the chooser
+            // found one clear of it; else her sails go in to steerage (Steer), her course kept, full sail again 3 s after it is clear:
+            // with no course clear of it, or, in a tack, a wear, held or backing (no change of course), for a meeting within StopSeconds.
+            bool turning = backing || navigator.State == Manoeuvre.Tacking || navigator.State == Manoeuvre.Wearing || navigator.State == Manoeuvre.Blocked;
+            if ((turning || navigator.TrafficIgnored) && (!water.VelocityTrafficClear(p) || !water.MovingClear(p, Ahead(p, demand, look))) &&
+                TrafficPrediction.SailsIn(turning, water.TrafficWhen))
             {
                 if (!GivingWay) Log.Info("Sailing: " + Name + " gives way: " + water.Obstruction + ".");
                 giveWayUntil = Time.time + 3;
@@ -2457,9 +2677,25 @@ namespace ShipwrightAndTransport.Sailing
         private bool TackArcClear(RoutePoint p, float forward, double windFrom)
         {
             double heading = boat.Root.eulerAngles.y;
-            int sign = NavigationMath.Delta(heading, windFrom) < 0 ? -1 : 1;
+            int sign = TackNavigator.TackTurnSign(windFrom, navigator.CourseHeading);
             return TurnArcClear(p, forward, heading, sign, Math.Min(WearArcMost, TurnLeft(heading, navigator.CourseHeading, sign)));
         }
+
+        // A tack not yet begun, from `heading` to `course`, judged as Steer judges one under way: its arc round the turning circle, and the
+        // way `look` along `course` from the arc's end, where the tack leaves the ship.
+        private bool TackWayClear(RoutePoint p, float forward, double heading, double course, double windFrom, float look)
+        {
+            int sign = NavigationMath.Delta(heading, windFrom) < 0 ? -1 : 1;
+            double left = Math.Min(WearArcMost, TurnLeft(heading, course, sign));
+            if (!TurnArcClear(p, forward, heading, sign, left)) return false;
+            var end = TackEnd(p, heading, course, sign, MyTurnRadius());
+            return water.Clear(end, Ahead(end, course, look));
+        }
+
+        // Where a tack from `heading` to `course`, turning `sign` round a circle of `radius`, leaves the ship: its arc's end (WearArcMost
+        // at most), from which a tack's way along `course` is judged.
+        internal static RoutePoint TackEnd(RoutePoint p, double heading, double course, int sign, double radius) =>
+            TackNavigator.ArcPoint(p, heading, sign, radius, Math.Min(WearArcMost, TurnLeft(heading, course, sign)));
 
         // Her turn's arc from `heading`, `left` degrees going `sign` (+1 clockwise), round her turning circle, every WearArcStep.
         private bool TurnArcClear(RoutePoint p, float forward, double heading, int sign, double left)
@@ -2470,8 +2706,7 @@ namespace ShipwrightAndTransport.Sailing
             var from = p;
             for (double phi = Math.Min(WearArcStep, left); ; phi = Math.Min(phi + WearArcStep, left))
             {
-                double r = phi * Math.PI / 180;
-                var at = Ahead(Ahead(p, heading, radius * Math.Sin(r)), heading + 90, sign * radius * (1 - Math.Cos(r)));
+                var at = TackNavigator.ArcPoint(p, heading, sign, radius, phi);
                 if (!water.Clear(from, at)) return false;
                 from = at;
                 if (phi >= left) return true;
@@ -2494,8 +2729,8 @@ namespace ShipwrightAndTransport.Sailing
                 double ahead = radius * Math.Sin(most * fraction), aside = Math.Sign(turn) * radius * (1 - Math.Cos(most * fraction));
                 var at = Ahead(Ahead(p, heading, (float)ahead), heading + 90, (float)aside);
                 if (!water.Clear(from, at))
-                    return "Her turn to " + course.ToString("F0") + " (" + Math.Abs(turn).ToString("F0") + " degrees at " + forward.ToString("F1") + " m/s) carries her " +
-                        advance.ToString("F0") + " m on along her heading, and her turn's way is blocked (decision 169): " + water.Obstruction;
+                    return "Its turn to " + course.ToString("F0") + " (" + Math.Abs(turn).ToString("F0") + " degrees at " + forward.ToString("F1") + " m/s) carries it " +
+                        advance.ToString("F0") + " m on along its heading, and its turn's way is blocked (decision 169): " + water.Obstruction;
                 from = at;
             }
             return null;
@@ -2515,11 +2750,18 @@ namespace ShipwrightAndTransport.Sailing
         // straight past the corners of her 89-100 m harbour legs into the shore; every course read as blocked and the headings she
         // kept clear on walked from 59 to 164 degrees, her helm hard over one way, then the other).
         internal const double GuideTolerance = 5;
+        // Off the line, a guide point nearer than the stopping run: that run straight along the heading must be clear too, as the
+        // hemmed-in check sweeps it (on the line its arcs are judged instead, LineAheadClear).
+        internal static bool GuideStopRun(double toGuide, double stopRun, bool onLine) => !onLine && toGuide < stopRun;
+        // The stopping run: the larger of the hull's length and StopSeconds of its speed.
+        private float StopRun() => Mathf.Max(water.Length, boat.Body.velocity.magnitude * StopSeconds);
         private bool WayClear(RoutePoint p, double h, float look, double bearing, RoutePoint guide)
         {
             double toGuide = RoutePoint.Distance(p, guide);
             // Decision 198 (e): on her line her guide is close ahead and she turns along it, her heading leading its bearing.
             if (toGuide < 1 || toGuide >= look || Math.Abs(NavigationMath.Delta(h, bearing)) > (line != null ? LineGuideTolerance : GuideTolerance)) return water.Clear(p, Ahead(p, h, look));
+            float stopRun = StopRun();
+            if (GuideStopRun(toGuide, stopRun, line != null) && !water.Clear(p, Ahead(p, h, stopRun))) return false;
             if (!water.Clear(p, guide)) return false;
             double left = look - toGuide;
             var from = guide;
@@ -2595,7 +2837,7 @@ namespace ShipwrightAndTransport.Sailing
                 var rest = new RoutePoint[Job.route.Length - Job.waypoint + 1];
                 rest[0] = p;
                 Array.Copy(Job.route, Job.waypoint, rest, 1, Job.route.Length - Job.waypoint);
-                hers = routes.Count; names.Add("hers"); routes.Add(rest);
+                hers = routes.Count; names.Add("its own"); routes.Add(rest);
             }
             // Hers re-planned by the wind she has, from here to the checkpoint after her next one, then on as it was (the user,
             // 2026-10-11, run 20261011-105718: the wind veered and the Cog's first short leg at Dragon Cliffs, laid at the booking,
@@ -2611,12 +2853,12 @@ namespace ShipwrightAndTransport.Sailing
                 {
                     var joined = new System.Collections.Generic.List<RoutePoint>(leg);
                     for (int i = rejoin + 1; i < Job.route.Length; i++) joined.Add(Job.route[i]);
-                    hersAgain = routes.Count; names.Add("hers re-planned by the wind to her checkpoint " + rejoin); routes.Add(joined.ToArray());
+                    hersAgain = routes.Count; names.Add("its own re-planned by the wind to its checkpoint " + rejoin); routes.Add(joined.ToArray());
                 }
             }
             double toGoal = NavigationMath.Heading(goal.x - p.x, goal.z - p.z);
             int others = 0, plannings = 0;
-            foreach (double turn in new[] { 0.0, 60, -60, 120, -120 }.OrderBy(t => Unberthing.Sailable(toGoal + t, windFrom, noGo) ? 0 : 1))
+            foreach (double turn in new[] { 0.0, 60, -60, 120, -120 }.OrderBy(t => Unberthing.Sailable(toGoal + t, windFrom, noGo, Margin) ? 0 : 1))
             {
                 if (others >= 2 || plannings >= 3) break;
                 var offing = Ahead(p, toGoal + turn, RouteOffing);
@@ -2633,9 +2875,9 @@ namespace ShipwrightAndTransport.Sailing
             // Hers, or hers re-planned when hers can't be followed from here; another only when a tenth faster.
             int keep = hers >= 0 ? hers : hersAgain;
             int take = keep < 0 || times[best] < times[keep] * 0.9 ? best : keep;
-            Log.Info("Sailing: " + Name + " chooses her route (" + why + "; the wind from " + windFrom.ToString("F0") + "): " +
+            Log.Info("Sailing: " + Name + " chooses its route (" + why + "; the wind from " + windFrom.ToString("F0") + "): " +
                 string.Join("; ", names.Select((n, i) => n + " " + RouteMath.Length(routes[i]).ToString("F0") + " m, time " + times[i].ToString("F0")).ToArray()) +
-                "; " + (take == hers ? "she keeps hers" : "taken: " + names[take]) + ".");
+                "; " + (take == hers ? "it keeps its own" : "taken: " + names[take]) + ".");
             if (take == hers) return false;
             ReplaceRoute(routes[take]);
             return true;
@@ -2672,15 +2914,35 @@ namespace ShipwrightAndTransport.Sailing
                 (boat.PlayerAboard || boat.ObserverDistance <= DistanceHandover.SailWithin);
         }
 
-        private void HemmedIn(string reason)
+        // A turn that timed out or stalled (FaultKind.Manoeuvre), with open water around (the way along the heading clear within the stopping
+        // distance; the turn to 120 degrees off the apparent wind on the bow's side, and the way along it, clear) and the fault ladder
+        // allowing it: no hold and no furl; the bow borne away at once, its sail set aback at once if it lies in irons, the course chosen
+        // again. False: the fault goes on to the old way (backing, the unberthing stage, a hold).
+        private bool RecoverTurn(RoutePoint p, double apparentFrom, float forward, float look, double bearing, RoutePoint waypoint)
+        {
+            double headingNow = boat.Root.eulerAngles.y, away = NavigationMath.Normalize(apparentFrom + TackNavigator.Side(apparentFrom, headingNow) * 120);
+            float stop = Mathf.Max(water.Length, Mathf.Abs(forward) * StopSeconds);
+            bool open = water.Clear(p, Ahead(p, headingNow, stop)) && water.TurnClear(p, headingNow, away) && WayClear(p, away, look, bearing, waypoint);
+            string failed = navigator.Reason;
+            if (!faults.Recover(FaultKind.Manoeuvre, open)) return false;
+            navigator.BearAway(headingNow, apparentFrom);
+            ironsSeconds = IronsAfter;
+            steeringTarget = Vector(Ahead(p, navigator.Demand, Math.Max(120, look * 2)));
+            TraceFor(30);
+            Log.Info("Sailing: " + Name + "'s turn failed with open water around (" + failed + "): no hold; it bears away at once to fill its sails and chooses its course again (" +
+                faults.RecoveriesInRow + " of " + FaultLadder.Recoveries + " before a hold).");
+            return true;
+        }
+
+        private void HemmedIn(string reason, FaultKind kind = FaultKind.Close)
         {
             // Decision 198 (b): a check failed on her line: planned again from where she lies.
-            if (line != null) ReplanLine("she was hemmed in");
+            if (line != null) ReplanLine("it was hemmed in");
             // Or hemmed in within a minute of the tow letting her go, wherever she is: her way out isn't done (run 20261010-132249's
             // S5: the whole tow left the Cog 222 m out, a square rig with the wind astern, her wear blocked by the island's rock,
             // past the 300 m; she held). The whole tow takes her on from there.
             bool fresh = Job.dockingPhase == 0 && Time.time - unberthFinishedAt < FreshAfterTow && (boat.PlayerAboard || boat.ObserverDistance <= DistanceHandover.SailWithin);
-            if (unberthEntries >= MaximumUnberthings || !(NearOriginBerth() || fresh)) { Hold(reason); return; }
+            if (unberthEntries >= MaximumUnberthings || !(NearOriginBerth() || fresh)) { Hold(reason, kind); return; }
             unberthEntries++;
             // Hemmed in again is her own way out failing too (decision 123's count; run 20261010-100003: the Cog, towed clear in a
             // dead onshore wind, went through every re-entry and held, the whole tow never reached): pushed off again, and after
@@ -2701,11 +2963,10 @@ namespace ShipwrightAndTransport.Sailing
         private double rigMinimum = double.NaN;
         // Decision 153: the limit chosen for her sails when there is one (SailControlAdapters.Limit).
         private double RigMinimum => sails != null && NavigationMath.Finite(sails.Limit) ? sails.Limit : double.IsNaN(rigMinimum) ? (rig.Sails.Any(s => s.squareSail) ? 75 : 60) : rigMinimum;
-        // Decision 177 (the user, 2026-10-11 night, to sail out of port faster): in port (in her harbour's chart, or within RouteHarbour of
-        // her origin or destination berth) she beats right at her dead zone, at sea 5 degrees outside it (her dead zone where her sails
-        // catch 0.5 of the wind, at sea and in port since decision 214). Her close-hauled's margin beyond her dead zone.
+        // In port: in the harbour's chart, or within RouteHarbour of the origin or destination berth (decision 177). The close-hauled
+        // margin beyond the dead zone is the one the ship's steering has earned (SteeringScatter), at sea and in port.
         private bool InPort => sails != null && sails.InPort;
-        private double Margin => InPort ? TackNavigator.PortCloseMargin : TackNavigator.CloseMargin;
+        private double Margin => scatter.Margin;
         private bool PortNow()
         {
             var berth = OriginBerth();
@@ -2718,12 +2979,12 @@ namespace ShipwrightAndTransport.Sailing
         {
             if (sails == null) return;
             bool now = PortNow();
+            sails.Margin = Margin;
             // Decision 198 (c): 180 (her heading kept rather than a big turn) not on her line.
             if (!sails.SetInPort(now)) { if (navigator != null) { navigator.Margin = Margin; navigator.NoWear = now; navigator.KeepHeading = now && line == null; } return; }
-            if (navigator != null) { navigator.Margin = Margin; navigator.NoWear = now; navigator.KeepHeading = now && line == null; navigator.Rechoose(now ? "she is in port (decision 177)" : "she is out of port (decision 177)"); }
-            Log.Info("Sailing: " + Name + (now ? " is in port" : " is out of port") + ": her dead zone " + DeadZone.ToString("F0") + " degrees, close-hauled " +
-                TackNavigator.BeatOff(DeadZone, Margin).ToString("F0") + " (decision 177: " + (now ? "in port she beats at her dead zone" : "at sea she beats " +
-                TackNavigator.CloseMargin.ToString("F0") + " degrees outside it") + ").");
+            if (navigator != null) { navigator.Margin = Margin; navigator.NoWear = now; navigator.KeepHeading = now && line == null; navigator.Rechoose(now ? "it is in port (decision 177)" : "it is out of port (decision 177)"); }
+            Log.Info("Sailing: " + Name + (now ? " is in port" : " is out of port") + ": its dead zone " + DeadZone.ToString("F0") + " degrees, close-hauled " +
+                TackNavigator.BeatOff(DeadZone, Margin).ToString("F0") + " (the margin its steering has earned, " + Margin.ToString("F1") + " degrees).");
         }
         private float limitAt, limitHeldUntil;
         // A limit taken is kept at least LimitHold, unless it has no clear heading (SailControlAdapters.ChooseLimit's `held`).
@@ -2754,16 +3015,16 @@ namespace ShipwrightAndTransport.Sailing
         // degrees put every heading toward Dragon Cliffs' exit in her no-go, and she turned east; a moment later she sailed on her jib at 29).
         private double EscapeDeadZone => sails != null && NavigationMath.Finite(sails.LeastLimit) ? NavigationMath.Clamp(sails.LeastLimit, 10, 89) : DeadZone;
 
-        // Her routes' no-go off the true wind: her dead-zone angle turned to the true wind at her speed ahead now, in the wind now.
-        // Route planning (RoutePlanner) keeps it: a route's legs run in many directions, and the apparent wind on a leg she isn't
-        // sailing is the true wind and her speed along that leg, which is what turning her dead-zone angle to the true wind reckons.
+        // The routes' no-go off the true wind: the ship's dead-zone angle turned to the true wind at the speed it is expected to beat at
+        // (ChartBeatSpeed, as the harbour chart's beat), in the wind now. Route planning (RoutePlanner) keeps it: a route's legs run in
+        // many directions, and the apparent wind on a leg the ship isn't sailing is the true wind and its speed along that leg, which is what
+        // turning the dead-zone angle to the true wind reckons.
         private float NoGo
         {
             get
             {
                 var wind = Vector3.ProjectOnPlane(Wind.currentWind, Vector3.up);
-                float ahead = boat != null && boat.Body ? Vector3.Dot(boat.Body.velocity, boat.Root.forward) : 0f;
-                return (float)NavigationMath.Clamp(UpwindLimits.TrueAngle(RigMinimum, wind.magnitude, ahead), 10, 89);
+                return (float)NavigationMath.Clamp(UpwindLimits.TrueAngle(RigMinimum, wind.magnitude, ChartBeatSpeed), 10, 89);
             }
         }
 
@@ -2862,11 +3123,11 @@ namespace ShipwrightAndTransport.Sailing
             }
             else push = PushDistance(p, h, h - side * 90, out pushHow);
             offGap = towClearGap = push;
-            Log.Info("Sailing: " + Name + " unberths (" + because + "): " + (alongside ? "pushed " + push.ToString("F1") + " m off (" + pushHow + "), her heading held (decisions 181, 192, 198 i)" : "her sailor takes her where she lies")
-                + "; the dock on her " + (side > 0 ? "starboard" : "port")
+            Log.Info("Sailing: " + Name + " unberths (" + because + "): " + (alongside ? "pushed " + push.ToString("F1") + " m off (" + pushHow + "), its heading held (decisions 181, 192, 198 i)" : "its sailor takes it where it lies")
+                + "; the dock on its " + (side > 0 ? "starboard" : "port")
                 + " side by " + sideFrom + (alongside ? "" : " (nothing alongside)") + "; heading " + h.ToString("F0") + ". " + StuckReport());
             // Decision 220: at Kicia Bay the tow takes her out of its channel before her sailor has her: after the push back onto the spot
-            // where she lies at the cleats (219; FinishUnberthing hands her to the tow out), else from where she lies (a restart after a save
+            // where she lies at the cleats (219; FinishUnberthing hands her to the tow out), else from where she lies (a restart after a load
             // or a hold); never the backup tow while it is to come.
             if (TowOutPending)
             {
@@ -2874,21 +3135,104 @@ namespace ShipwrightAndTransport.Sailing
                 else BeginTowOut(because);
                 return;
             }
-            if (towWhole) { TowWhole("her own way out failed " + towOffs + " times"); return; }
+            if (towWhole) { TowWhole("its own way out failed " + towOffs + " times"); return; }
             // Decision 194 (the user, 2026-10-12, seeing the Brig towed round by the bow after her push: "shouldn't unberth only push brig
             // out?"; then, asked what may help her once she sails: "push off dock again only"): no tow but the push off the dock and the
             // backup tow. Nothing alongside, her sailor takes her from where she lies, whatever failed before (it was the tow by the bow,
             // runs 20261012-121825 and -121906 on FL: "is towed (her own way out failed already)"; FM's push astern is gone too).
             if (!alongside) { FinishUnberthing(true); return; }
-            StartTow("her own way out failed already", towNow);
+            StartTow("its own way out failed already", towNow);
         }
 
         // Decision 225 (14): her final approach (203) ends a tack or a wear under way first: kept, Steer's dead-zone guard and decision 211
         // stayed off for the whole approach.
-        private bool BeginFinalApproach(float dt)
+        // `straight`: the bearing of a straight way in to the release spot (StraightInTo), NaN to line up on the berth's axis.
+        private bool BeginFinalApproach(float dt, double straight = double.NaN)
         {
-            if (navigator != null && (navigator.State == Manoeuvre.Tacking || navigator.State == Manoeuvre.Wearing)) navigator.Interrupt("her final approach begins");
+            if (navigator != null && (navigator.State == Manoeuvre.Tacking || navigator.State == Manoeuvre.Wearing)) navigator.Interrupt("its final approach begins");
+            straightIn = straight; finalLinedUp = false;
             Job.dockingPhase = 1; ++Job.revision; return NavigateDocking(dt);
+        }
+
+        // The final approach's axis: the straight way in's bearing (StraightInTo), else the berth's heading.
+        private bool StraightNow => Job.dockingPhase == 1 && towStart == null && NavigationMath.Finite(straightIn);
+        private double FinalAxis => StraightNow ? straightIn : Job.dockHeading;
+
+        // Lined up on the final approach's axis (ArrivalSail.LinedUp), logged once a final approach as it first holds.
+        private bool finalLinedUp;
+        private bool LinedUp(float distance)
+        {
+            double axis = FinalAxis, r = axis * Math.PI / 180;
+            var p = Point(boat.StablePosition);
+            double dx = Job.destination.x - p.x, dz = Job.destination.z - p.z;
+            double along = dx * Math.Sin(r) + dz * Math.Cos(r), across = dx * Math.Cos(r) - dz * Math.Sin(r);
+            double off = NavigationMath.Delta(axis, boat.Root.eulerAngles.y);
+            bool was = finalLinedUp;
+            finalLinedUp = ArrivalSail.LinedUp(off, across, along, 2 * water.Radius, was);
+            if (finalLinedUp && !was)
+                Log.Info("Sailing: " + Name + " is lined up on its final approach (stage 34 i): " + off.ToString("F0") + " degrees and " + Math.Abs(across).ToString("F1") +
+                    " m off its axis, " + distance.ToString("F0") + " m from the spot; it carries its speed in and takes its sail in where it coasts down to " +
+                    ArrivalSail.HoldSpeed.ToString("F1") + " m/s by " + ArrivalSail.HoldReach.ToString("F0") + " m from it.");
+            return finalLinedUp;
+        }
+
+        // The final approach's straight way in: its bearing (NaN: lined up on the berth's axis), not saved, so after a load the approach
+        // lines up; tried once until the sailor lets go (ResetDocking); checked every StraightInEvery; why not, logged once.
+        private double straightIn = double.NaN;
+        private bool straightInTried, straightInNoted;
+        private float straightInAt;
+        private const float StraightInEvery = 1f;
+
+        // The bearing from `p` straight to the release spot when the ship may go there directly (ArrivalSail.StraightIn): within
+        // StraightInWithin of it, not turning, the bearing sailable on the apparent wind of that heading and reached without turning
+        // through the wind's eye, then the hull's box clear along the way and through its turns where it lies and onto the berth at the
+        // spot, and no boat under way across it; else NaN.
+        private double StraightInTo(RoutePoint p)
+        {
+            if (straightInTried || Time.time < straightInAt || !chartArriving || !InHarbourChart || !Job.berthKnown || noArrivalSpot || AnchorLegOpen ||
+                ArrivalOneWay || approachAgain || backing || navigator == null || navigator.State == Manoeuvre.Tacking || navigator.State == Manoeuvre.Wearing)
+                return double.NaN;
+            float distance = DistanceToTarget();
+            if (distance > ArrivalSail.StraightInWithin) return double.NaN;
+            straightInAt = Time.time + StraightInEvery;
+            var spot = Job.destination;
+            double heading = boat.Root.eulerAngles.y, ahead = Vector3.Dot(boat.Body.velocity, boat.Root.forward);
+            // Its line in: from where its turn toward the spot leaves it (the run while its helm goes over at its carry speed, then its circle).
+            double carry = CarrySpeed(Math.Max(0, ahead)), radius = MyTurnRadius();
+            double bearing = ArrivalSail.StraightAxis(p, heading, spot, radius, carry / HeadingController.Slew, out RoutePoint turnEnd);
+            var trueWind = Vector3.ProjectOnPlane(Wind.currentWind, Vector3.up);
+            double apparentFrom = ApparentFrom(), closeHauled = TackNavigator.BeatOff(DeadZone, Margin);
+            var wind = new HeadingWind(apparentFrom, WindFrom(), trueWind.magnitude, TackNavigator.ExpectedSpeed(ahead), TackNavigator.Side(apparentFrom, heading));
+            bool inCircle = !NavigationMath.Finite(bearing);
+            double off = inCircle ? double.NaN : wind.Off(bearing);
+            bool acrossEye = !inCircle && TackNavigator.CrossesEye(heading, bearing, apparentFrom);
+            string blocked = null;
+            if (inCircle) blocked = "the spot within its turning circle (radius " + radius.ToString("F0") + " m)";
+            else if (!ArrivalSail.StraightIn(distance, true, off, closeHauled, acrossEye))
+                blocked = acrossEye ? "its turn to it through the wind's eye (from " + apparentFrom.ToString("F0") + ")"
+                    : "the spot " + Math.Abs(off).ToString("F0") + " degrees off the apparent wind on that heading, inside close-hauled " + closeHauled.ToString("F0");
+            else if (!water.Clear(p, turnEnd) || !water.Clear(turnEnd, spot)) blocked = "its way blocked (" + water.Obstruction + ")";
+            else if (!water.TurnClear(p, heading, bearing)) blocked = "its turn to it where it lies blocked (" + water.Obstruction + ")";
+            else if (!water.TurnClear(spot, bearing, ReleaseSpots.LieHeading(Job.dockHeading, bearing))) blocked = "its turn onto the berth there blocked (" + water.Obstruction + ")";
+            else if (!water.MovingClear(p, spot, bearing)) blocked = "a boat under way across it (" + water.Obstruction + ")";
+            if (blocked == null && ArrivalSail.StraightIn(distance, true, off, closeHauled, acrossEye))
+            {
+                straightInTried = true;
+                Log.Info("Sailing: " + Name + " goes straight to the release spot (stage 34 h): " + distance.ToString("F0") + " m off, its line in at " + bearing.ToString("F0") +
+                    " from where its turn leaves it " + RoutePoint.Distance(turnEnd, spot).ToString("F0") + " m out (its circle " + radius.ToString("F0") + " m, carrying " +
+                    carry.ToString("F1") + " m/s, the wind's drift " + driftNow.ToString("F1") + "), its way and turns clear for the hull, the spot " + Math.Abs(off).ToString("F0") +
+                    " degrees off the apparent wind on that heading (close-hauled " + closeHauled.ToString("F0") + "); heading " + heading.ToString("F0") + ", the berth's way " +
+                    Job.dockHeading.ToString("F0") + ".");
+                return bearing;
+            }
+            if (!straightInNoted)
+            {
+                straightInNoted = true;
+                Log.Info("Sailing: " + Name + " doesn't go straight to the release spot " + distance.ToString("F0") + " m off at " +
+                    NavigationMath.Heading(spot.x - p.x, spot.z - p.z).ToString("F0") + (inCircle ? "" : ", its line in at " + bearing.ToString("F0")) + " (stage 34 h): " +
+                    blocked + "; heading " + heading.ToString("F0") + "; it goes on to its approach point and lines up on the berth's axis while that holds.");
+            }
+            return double.NaN;
         }
 
         // Once off the dock, where she turns: toward her next waypoint when her way along it is clear (and `usable`), so the
@@ -2921,7 +3265,7 @@ namespace ShipwrightAndTransport.Sailing
             var world = boat.Root.TransformPoint(new Vector3(0, 0, along));
             var v = boat.Body.GetPointVelocity(world);
             double made = speed > 1e-6 ? (v.x * target.x + v.z * target.z) / speed : 0;
-            AdaptTow(ref strength, made, speed, "pushing her off at an end");
+            AdaptTow(ref strength, made, speed, "pushing it off at an end");
             Unberthing.Tow(v.x, v.z, target.x, target.z, out var ax, out var az, strength);
             world.y = boat.Body.worldCenterOfMass.y;
             var force = new Vector3((float)ax, 0, (float)az) * boat.Body.mass * 0.5f;
@@ -2946,8 +3290,8 @@ namespace ShipwrightAndTransport.Sailing
             // Along her route the tow may go 1.5 km: its time is 15 minutes.
             if (towing && (towSeconds += dt) > (towRouteNext > 0 ? 900 : Unberthing.TowBudget))
             {
-                Log.Info("Sailing: " + Name + ": the tow's 5 minutes are out (the pull " + towStrength.ToString("F1") + " m/s², up to " + towStrengthMost.ToString("F1") + "): " + StuckReport() + "; " + TowContactReport());
-                EndTowContacts(); Hold("The tow could not take her off the dock in 5 minutes: " + water.Obstruction); return false;
+                Log.Info("Sailing: " + Name + ": the tow's " + ((towRouteNext > 0 ? 900 : Unberthing.TowBudget) / 60).ToString("F0") + " minutes are out (the pull " + towStrength.ToString("F1") + " m/s², up to " + towStrengthMost.ToString("F1") + "): " + StuckReport() + "; " + TowContactReport());
+                EndTowContacts(); Hold("The tow could not take it off the dock in " + ((towRouteNext > 0 ? 900 : Unberthing.TowBudget) / 60).ToString("F0") + " minutes: " + water.Obstruction); return false;
             }
             if (Time.time >= unberthProbeAt) { unberthProbeAt = Time.time + .25f; ProbeUnberthing(); }
             switch (unberthStage)
@@ -2960,12 +3304,12 @@ namespace ShipwrightAndTransport.Sailing
                     // comes here: BeginUnberthing hands it to TowWhole before any push.)
                     if (displaced >= towClearGap && closingWhy == null) { FinishUnberthing(true); break; }
                     // Decision 194: no clear water further out: the push ends where it is and her sailor takes her (it was the tow by the bow).
-                    if (!outwardClear) { Log.Info("Sailing: " + Name + ": no clear water further out after " + displaced.ToString("F1") + " m of the push (decision 194): her sailor takes her here."); FinishUnberthing(true); break; }
+                    if (!outwardClear) { Log.Info("Sailing: " + Name + ": no clear water further out after " + displaced.ToString("F1") + " m of the push (decision 194): its sailor takes it here."); FinishUnberthing(true); break; }
                     // No headway sideways (launch 5, candidate P: aground on the island's terrain, 5 minutes for nothing): under
                     // 0.5 m in 30 s, the tow takes her out by the bow instead.
                     if (stageSeconds >= towMarkAt + 30)
                     {
-                        if (displaced < towMark + 0.5f) { Log.Info("Sailing: " + Name + ": no headway in 30 s of the push (decision 194: her sailor takes her here): " + StuckReport()); FinishUnberthing(true); break; }
+                        if (displaced < towMark + 0.5f) { Log.Info("Sailing: " + Name + ": no headway in 30 s of the push (decision 194: its sailor takes it here): " + StuckReport()); FinishUnberthing(true); break; }
                         towMark = displaced; towMarkAt = stageSeconds;
                     }
                     helm.Demand = 0; helm.Apply(); UpdateSailSafety(dt, 0);
@@ -2981,7 +3325,7 @@ namespace ShipwrightAndTransport.Sailing
                         fairCheckAt = Time.time + FairCheckEvery;
                         if (FairSpot(out string fair))
                         {
-                            Log.Info("Sailing: " + Name + ": the backup tow lets her go where she can sail (decision 165): " + fair + ".");
+                            Log.Info("Sailing: " + Name + ": the backup tow lets it go where it can sail (decision 165): " + fair + ".");
                             FinishUnberthing(); break;
                         }
                     }
@@ -3040,7 +3384,7 @@ namespace ShipwrightAndTransport.Sailing
                  !water.Clear(towNearest, towTarget)))
             {
                 escapeCheckAt = Time.time + 10;
-                string why = towOffWay > Unberthing.TowClearance(water.Radius, water.Length) - water.Radius ? "she is " + towOffWay.ToString("F1") + " m off it" : "blocked (" + water.Obstruction + ")";
+                string why = towOffWay > Unberthing.TowClearance(water.Radius, water.Length) - water.Radius ? "it is " + towOffWay.ToString("F1") + " m off it" : "blocked (" + water.Obstruction + ")";
                 towPath = PlanTowOut(p); towIndex = 0; ResetPursuit(p);
                 Log.Info("Sailing: " + Name + ": the tow's way: " + why + "; " + (towPath != null ? "planned again." : "a clear heading instead."));
             }
@@ -3054,7 +3398,7 @@ namespace ShipwrightAndTransport.Sailing
                 if (!double.IsNaN(next) && Math.Abs(NavigationMath.Delta(next, old)) > 1)
                 {
                     escapeHeading = next;
-                    Log.Info("Sailing: " + Name + ": the way to " + old.ToString("F0") + " is blocked (" + blockedBy + "); she is towed toward " + next.ToString("F0") + " instead.");
+                    Log.Info("Sailing: " + Name + ": the way to " + old.ToString("F0") + " is blocked (" + blockedBy + "); it is towed toward " + next.ToString("F0") + " instead.");
                 }
             }
         }
@@ -3097,6 +3441,13 @@ namespace ShipwrightAndTransport.Sailing
         // 20261010-024308).
         private readonly Unberthing.TurnController towTurn = new Unberthing.TurnController();
         private double towPulledSeconds;
+        // An arrival tow (docking phases 3 and 4) led by the stern (Unberthing.SternLeads), set as the tow begins.
+        private bool towSternLeads;
+        private void ChooseTowEnd(RoutePoint p, RoutePoint[] path, RoutePoint goal)
+        {
+            var next = path != null && path.Length >= 2 ? path[1] : goal;
+            towSternLeads = Unberthing.SternLeads(boat.Root.eulerAngles.y, NavigationMath.Heading(next.x - p.x, next.z - p.z));
+        }
         internal const double TowPulledBeforeReplan = 10;
 
         // The tow's strength (m/s², Unberthing.TowStrength), its highest in this tow, and the next strength worth a log line
@@ -3115,7 +3466,7 @@ namespace ShipwrightAndTransport.Sailing
             if (!towContacts) towContacts = boat.Body.gameObject.AddComponent<TowContacts>();
         }
 
-        private string TowContactReport() => "touching her: " + (towContacts ? towContacts.Report(5) : "not watched");
+        private string TowContactReport() => "touching it: " + (towContacts ? towContacts.Report(5) : "not watched");
 
         private void EndTowContacts()
         {
@@ -3130,7 +3481,7 @@ namespace ShipwrightAndTransport.Sailing
             strength = Unberthing.TowStrength(strength, along, speed, Time.fixedDeltaTime);
             towStrengthMost = Math.Max(towStrengthMost, strength);
             if (strength < towStrengthNote) return;
-            Log.Info("Sailing: " + Name + ": the tow pulls harder, " + strength.ToString("F1") + " m/s² (" + (strength * boat.Body.mass).ToString("F0") + " N): she makes " +
+            Log.Info("Sailing: " + Name + ": the tow pulls harder, " + strength.ToString("F1") + " m/s² (" + (strength * boat.Body.mass).ToString("F0") + " N): it makes " +
                 along.ToString("F2") + " of " + speed.ToString("F2") + " m/s " + what + (double.IsNaN(off) ? "" : ", " + off.ToString("F0") + " degrees off the tow's line, turning " +
                 (boat.Body.angularVelocity.y * Mathf.Rad2Deg).ToString("F1") + " degrees a second (the turn's built push " + towTurn.Built.ToString("F0") + " degrees a second²)") +
                 "; the wind " + Vector3.ProjectOnPlane(Wind.currentWind, Vector3.up).magnitude.ToString("F1") + " m/s.");
@@ -3150,7 +3501,7 @@ namespace ShipwrightAndTransport.Sailing
                 if (towStuck == 0) towAtMiddle = false;
                 if (was <= Unberthing.StuckSeconds && towStuck > Unberthing.StuckSeconds)
                 {
-                    Log.Info("Sailing: " + Name + ": no headway under tow for 30 s at a pull of " + towStrength.ToString("F1") + " m/s²; the wind " + Vector3.ProjectOnPlane(Wind.currentWind, Vector3.up).magnitude.ToString("F1") + " m/s; " + TowForceReport() + ". " + StuckReport() + "; " + TowContactReport());
+                    Log.Info("Sailing: " + Name + ": no headway under tow for " + Unberthing.StuckSeconds.ToString("F0") + " s at a pull of " + towStrength.ToString("F1") + " m/s²; the wind " + Vector3.ProjectOnPlane(Wind.currentWind, Vector3.up).magnitude.ToString("F1") + " m/s; " + TowForceReport() + ". " + StuckReport() + "; " + TowContactReport());
                     // Out by the bow she pivoted along what held her (run V: 1.32 m/s, no headway): her way planned again from
                     // here, and the pull at her middle until she makes headway.
                     if (unberthStage == UnberthStage.TowOut)
@@ -3158,7 +3509,7 @@ namespace ShipwrightAndTransport.Sailing
                         var p = Point(boat.StablePosition);
                         towPath = PlanTowOut(p); towIndex = 0; ResetPursuit(p); towOutStart = p; towAtMiddle = true;
                         if (towPath == null) escapeHeading = Escape(p, boat.Root.eulerAngles.y, c => EscapeClear(p, c));
-                        Log.Info("Sailing: " + Name + ": the tow's way planned again from here (" + (towPath != null ? (towPath.Length - 1) + " legs" : "none: a clear heading") + "), pulled at her middle.");
+                        Log.Info("Sailing: " + Name + ": the tow's way planned again from here (" + (towPath != null ? (towPath.Length - 1) + " legs" : "none: a clear heading") + "), pulled at its middle.");
                         towProgressFrom = 0; towProgressAt = stageSeconds; return;
                     }
                 }
@@ -3173,7 +3524,7 @@ namespace ShipwrightAndTransport.Sailing
             unberthStage = UnberthStage.TowOff; stageSeconds = 0; heading.Reset(); towMark = displaced; towMarkAt = 0;
             towProgressAt = 0; towProgressFrom = double.NaN; towStuck = 0; ResetTowStrength(); WatchTowContacts();
             towDrawFore = towDrawAft = Unberthing.TowStrengthStart;
-            if (fallback) Log.Info("Sailing: " + Name + " is pushed off the dock again (her own way failed: " + why + ").");
+            if (fallback) Log.Info("Sailing: " + Name + " is pushed off the dock again (its own way failed: " + why + ").");
         }
 
         // How far the tow has taken her on this voyage (the QA reads it), and where she was at the last towed step.
@@ -3216,8 +3567,8 @@ namespace ShipwrightAndTransport.Sailing
             double off = Math.Abs(NavigationMath.Delta(windFrom, toGuide));
             if (off < beat + FairMargin) return false;
             if (!water.TurnClear(p, boat.Root.eulerAngles.y, toGuide) || !WayClear(p, toGuide, Look(FairSpeed), toGuide, guide)) return false;
-            why = "her guide point " + RoutePoint.Distance(p, guide).ToString("F0") + " m off at " + toGuide.ToString("F0") + ", " + off.ToString("F0") +
-                " degrees off the true wind (from " + windFrom.ToString("F0") + ", her close-hauled " + beat.ToString("F0") + "), her way clear for " + Look(FairSpeed).ToString("F0") +
+            why = "its guide point " + RoutePoint.Distance(p, guide).ToString("F0") + " m off at " + toGuide.ToString("F0") + ", " + off.ToString("F0") +
+                " degrees off the true wind (from " + windFrom.ToString("F0") + ", its close-hauled " + beat.ToString("F0") + "), its way clear for " + Look(FairSpeed).ToString("F0") +
                 " m; " + from.ToString("F0") + " m from where the tow began";
             return true;
         }
@@ -3232,7 +3583,7 @@ namespace ShipwrightAndTransport.Sailing
             // The last resort gets the tow's whole 5 minutes (run 20261010-100003: at Fort Aestrin the short tows had spent them, and
             // the whole tow held at once, "The tow could not take her off the dock in 5 minutes").
             towSeconds = 0;
-            Log.Info("Sailing: " + Name + ": the backup tow takes her (" + why + "; decision 165: let go where she can sail).");
+            Log.Info("Sailing: " + Name + ": the backup tow takes it (" + why + "; decision 165: let go where it can sail).");
             if (unberthStage != UnberthStage.TowOff && unberthStage != UnberthStage.TowOut) { ResetTowStrength(); WatchTowContacts(); }
             EnterTowOut();
         }
@@ -3248,14 +3599,14 @@ namespace ShipwrightAndTransport.Sailing
             {
                 escapeHeading = NavigationMath.Heading(towPath[1].x - p.x, towPath[1].z - p.z);
                 unberthStage = UnberthStage.TowOut; stageSeconds = 0; heading.Reset();
-                Log.Info("Sailing: " + Name + " is towed off the dock (" + displaced.ToString("F1") + " m); the tow takes her out along a clear way, "
+                Log.Info("Sailing: " + Name + " is towed off the dock (" + displaced.ToString("F1") + " m); the tow takes it out along a clear way, "
                     + (towPath.Length - 1) + " legs, " + RouteMath.Length(towPath).ToString("F0") + " m, first to " + escapeHeading.ToString("F0") + ".");
                 return;
             }
             escapeHeading = Escape(p, h, c => EscapeClear(p, c));
             if (double.IsNaN(escapeHeading)) escapeHeading = NavigationMath.Normalize(dockBearing + 180);
             unberthStage = UnberthStage.TowOut; stageSeconds = 0; heading.Reset();
-            Log.Info("Sailing: " + Name + " is towed off the dock (" + displaced.ToString("F1") + " m); no clear way planned; the tow takes her out to " + escapeHeading.ToString("F0") + ".");
+            Log.Info("Sailing: " + Name + " is towed off the dock (" + displaced.ToString("F1") + " m); no clear way planned; the tow takes it out to " + escapeHeading.ToString("F0") + ".");
         }
 
         // A clear way for the tow (her hull's swept clearance, no wind: a tow needs none) to an offing 200 m off: toward her next
@@ -3315,8 +3666,8 @@ namespace ShipwrightAndTransport.Sailing
             }
             if (points.Count < 2) return null;
             towRouteNext = Math.Min(next, Job.route.Length - 1);
-            Log.Info("Sailing: " + Name + ": the tow takes her along her route, " + (points.Count - 1) + " legs, " + total.ToString("F0") + " m, to waypoint " +
-                (next - 1) + " (her next leg " + (next < Job.route.Length ? "sailable" : "her route's end") + " or " + WholeTowMetres.ToString("F0") + " m).");
+            Log.Info("Sailing: " + Name + ": the tow takes it along its route, " + (points.Count - 1) + " legs, " + total.ToString("F0") + " m, to waypoint " +
+                (next - 1) + " (its next leg " + (next < Job.route.Length ? "sailable" : "its route's end") + " or " + WholeTowMetres.ToString("F0") + " m).");
             return points.ToArray();
         }
 
@@ -3339,7 +3690,7 @@ namespace ShipwrightAndTransport.Sailing
                     if (!clear(offing, offing)) continue;
                     var path = RoutePlanner.Plan(p, offing, clear, 0, 0, 1500);
                     if (path.Length < 2) continue;
-                    Log.Info("Sailing: " + Name + ": the tow's way, " + (wide ? Unberthing.TowClearance(water.Radius, water.Length).ToString("F1") + " m clear each side" : "her own clearance only (no wider way)")
+                    Log.Info("Sailing: " + Name + ": the tow's way, " + (wide ? Unberthing.TowClearance(water.Radius, water.Length).ToString("F1") + " m clear each side" : "its own clearance only (no wider way)")
                         + ": " + string.Join(" ", path.Select(q => "(" + q.x.ToString("F0") + ", " + q.z.ToString("F0") + ")").ToArray()) + ".");
                     return path;
                 }
@@ -3353,7 +3704,7 @@ namespace ShipwrightAndTransport.Sailing
         {
             EndTowContacts();
             Job.unberthing = false; ++Job.revision; unberthStage = UnberthStage.Read;
-            Log.Info("Sailing: " + Name + ": the player is " + boat.ObserverDistance.ToString("F0") + " m off while she comes off the dock; the tow lets go and the clock takes her on.");
+            Log.Info("Sailing: " + Name + ": the player is " + boat.ObserverDistance.ToString("F0") + " m off while it comes off the dock; the tow lets go and the clock takes it on.");
         }
 
         // Her way ahead is clear: the tow lets go, her sails are set, and her route goes on from here (replanned when its next
@@ -3375,9 +3726,9 @@ namespace ShipwrightAndTransport.Sailing
             float h = boat.Root.eulerAngles.y;
             navigator.Restore(Job.tack, h, ApparentFrom(), DeadZone);
             ResetHelmWatch();
-            sails.Plan((float)heel.Deployment, false); tickClock = 0.5f; navigationClock = 1; replanAt = 0; heading.Reset();
-            Log.Info("Sailing: " + Name + " left her berth (" + (towSeconds > 0 ? "towed " + TowedMetres.ToString("F0") + " m, " + towSeconds.ToString("F0") + " s, the pull up to " + towStrengthMost.ToString("F1") + " m/s²" : "not towed")
-                + "): " + (offTheDock ? "her sailor takes her at heading " : "her way ahead is clear at heading ") + h.ToString("F0") + ", " + displaced.ToString("F1") + " m off the dock; full-sail target set.");
+            sails.Plan((float)heel.Deployment); tickClock = 0.5f; navigationClock = 1; replanAt = 0; heading.Reset();
+            Log.Info("Sailing: " + Name + " left its berth (" + (towSeconds > 0 ? "towed " + TowedMetres.ToString("F0") + " m, " + towSeconds.ToString("F0") + " s, the pull up to " + towStrengthMost.ToString("F1") + " m/s²" : "not towed")
+                + "): " + (offTheDock ? "its sailor takes it at heading " : "its way ahead is clear at heading ") + h.ToString("F0") + ", " + displaced.ToString("F1") + " m off the dock; full-sail target set.");
         }
 
         // Alongside her berth's dock (its cleats tell the side) with an onshore wind of at least 1 m/s: why, else null.
@@ -3390,7 +3741,7 @@ namespace ShipwrightAndTransport.Sailing
             var wind = Vector3.ProjectOnPlane(Wind.currentWind, Vector3.up);
             if (side == 0 || wind.magnitude < Unberthing.MinimumWind) return null;
             double angle = Unberthing.WindToDock(h, side, WindFrom());
-            return angle >= Unberthing.OnshoreAngle ? "an onshore wind would lay her onto the dock (" + angle.ToString("F0") + " degrees off it, " + wind.magnitude.ToString("F1") + " m/s)" : null;
+            return angle >= Unberthing.OnshoreAngle ? "an onshore wind would lay it onto the dock (" + angle.ToString("F0") + " degrees off it, " + wind.magnitude.ToString("F1") + " m/s)" : null;
         }
 
         // ---- What holds her (launch 5, runs P, R, S: unmoved by sail and tow for 10 minutes; run 20261007-080048's pictures: heeled
@@ -3435,14 +3786,14 @@ namespace ShipwrightAndTransport.Sailing
                 .Where(c => c && !IsOwnVesselCollider(c) && !c.GetComponentInParent<ShipItem>())
                 .Select(c => c.name + (c.transform.parent ? " (" + c.transform.parent.name + ")" : "")).Distinct().Take(8).ToArray();
             var rope = boat.Moorings.GetAnchorController();
-            return "aground " + (Unberthing.Aground(gaps) ? "yes" : "no") + " (under her keel: " + keel + "); " + sea
+            return "aground " + (Unberthing.Aground(gaps) ? "yes" : "no") + " (under its keel: " + keel + "); " + sea
                 + "; heel " + CourseSafety.HeelDegrees(boat.Root.right.y, boat.Root.up.y).ToString("F0") + " degrees"
                 + "; body " + (body.isKinematic ? "kinematic" : "dynamic") + ", constraints " + body.constraints + ", drag " + body.drag.ToString("F2")
                 + "/" + body.angularDrag.ToString("F2") + ", mass " + body.mass.ToString("F0") + ", speed " + body.velocity.magnitude.ToString("F2") + " m/s"
                 + "; water " + boat.Damage.waterLevel.ToString("F2") + (boat.Damage.sunk ? " (sunk)" : "")
                 + "; " + string.Join(", ", lines.ToArray()) + "; anchor " + (boat.Anchor.IsSet() ? "set" : "up") + (rope ? " (" + rope.currentLength.ToString("F2") + ")" : "")
                 + "; joints to other bodies: " + (joints.Length == 0 ? "none" : string.Join(", ", joints))
-                + "; in her hull's box: " + (touching.Length == 0 ? "nothing" : string.Join(", ", touching));
+                + "; in its hull's box: " + (touching.Length == 0 ? "nothing" : string.Join(", ", touching));
         }
 
         private void SteerTo(double target, float dt)
@@ -3500,6 +3851,8 @@ namespace ShipwrightAndTransport.Sailing
             var forward = boat.Root.forward; forward.y = 0;
             if (forward.sqrMagnitude < 1e-6f) return;
             forward.Normalize();
+            // The leading end: the stern on an arrival tow that began with its way astern.
+            if (towSternLeads && Job != null && (Job.dockingPhase == 3 || Job.dockingPhase == 4)) forward = -forward;
             double off = NavigationMath.Delta(NavigationMath.Heading(forward.x, forward.z), bearing);
             double rate = boat.Body.angularVelocity.y * Mathf.Rad2Deg;
             // The turn with what it lacks built up (Unberthing.TurnController; the user, 2026-10-10).
@@ -3510,7 +3863,7 @@ namespace ShipwrightAndTransport.Sailing
             boat.Body.AddTorque(Vector3.up * (float)(turn * Mathf.Deg2Rad), ForceMode.Acceleration);
             double target = speed * Unberthing.BowFirstShare(off);
             double along = Vector3.Dot(boat.Body.velocity, forward);
-            AdaptTow(ref towStrength, along, target, "along her length", off);
+            AdaptTow(ref towStrength, along, target, "along its length", off);
             var force = forward * (float)(Unberthing.TowAlong(along, target, towStrength) * boat.Body.mass);
             NoteTowForce(force);
             boat.Body.AddForce(force);
@@ -3625,7 +3978,7 @@ namespace ShipwrightAndTransport.Sailing
             chartPaused = (chart == null || chartNext < chart.Count) && !ChartSeabedOn(ChartIsland());
             if (chartPaused)
             {
-                Status.Message = "Waiting until the player is near enough to chart her harbour.";
+                Status.Message = "Waiting until the player is near enough to chart its harbour.";
                 return false;
             }
             if (chart == null)
@@ -3634,9 +3987,10 @@ namespace ShipwrightAndTransport.Sailing
                 double half = Math.Min(ChartMostHalf, radius + ChartBeyond);
                 chartHeap = GC.GetTotalMemory(false); chartLongest = 0; chartFrameAt = -1;
                 chart = new WaterField(island.x, island.z, half, ChartCell);
+                unsailableClosed.Clear(); unsailableCount = 0; unsailableOff = unsailableCheck = false;
                 chartUnknown = water.UnloadedNear(island, (float)(half * Math.Sqrt(2)));
                 chartNext = 0; chartFrames = 0; chartMs = 0; floodMs = 0; floodFrames = 0; chartShallow = 0;
-                Log.Info("Sailing: " + Name + " charts " + (chartArriving ? "her destination's harbour (decision 198 h)" : "her harbour (decision 157)") + ": " + chart.Width + " by " + chart.Height +
+                Log.Info("Sailing: " + Name + " charts " + (chartArriving ? "its destination's harbour (decision 198 h)" : "its harbour (decision 157)") + ": " + chart.Width + " by " + chart.Height +
                     " cells of " + ChartCell.ToString("F0") + " m round the island's centre, " + radius.ToString("F0") + " m its envelope" +
                     (chartUnknown.Count > 0 ? ", " + chartUnknown.Count + " islands not loaded within it (never water)" : "") + ".");
             }
@@ -3653,7 +4007,7 @@ namespace ShipwrightAndTransport.Sailing
                 chartNext++;
             }
             chartFrames++; chartMs += clock.Elapsed.TotalMilliseconds;
-            if (chartNext < chart.Count) { Status.Message = "Charting her harbour (" + (100.0 * chartNext / chart.Count).ToString("F0") + "%)."; return false; }
+            if (chartNext < chart.Count) { Status.Message = "Charting its harbour (" + (100.0 * chartNext / chart.Count).ToString("F0") + "%)."; return false; }
             // Decision 198 (j): the flood a slice a frame too.
             if (!chart.Flooded)
             {
@@ -3667,24 +4021,24 @@ namespace ShipwrightAndTransport.Sailing
                 var slice = System.Diagnostics.Stopwatch.StartNew();
                 bool flooded = chart.FloodStep(ChartBudgetMs);
                 floodMs += slice.Elapsed.TotalMilliseconds; floodFrames++;
-                if (!flooded) { Status.Message = "Charting her harbour (her way " + (chartArriving ? "in" : "out") + ")."; return false; }
+                if (!flooded) { Status.Message = "Charting its harbour (its way " + (chartArriving ? "in" : "out") + ")."; return false; }
             }
             chartDone = true;
             int wet = 0;
             for (int i = 0; i < chart.Count; i++) if (chart.Water(i)) wet++;
             var way = chart.Descent(p, 1e7);
             var centre = chart.Centre(chart.Count / 2 + chart.Width / 2);
-            string exit = way.Count == 0 ? (chartArriving ? "nowhere from here (not in its water yet)" : "none from here") : chartArriving ? RoutePoint.Distance(p, chartGoal).ToString("F0") + " m to her approach point, " +
+            string exit = way.Count == 0 ? (chartArriving ? "nowhere from here (not in its water yet)" : "none from here") : chartArriving ? RoutePoint.Distance(p, chartGoal).ToString("F0") + " m to its approach point, " +
                 chart.DistanceFrom(p).ToString("F0") + " m by water from here" : NavigationMath.Heading(way[way.Count - 1].x - centre.x, way[way.Count - 1].z - centre.z).ToString("F0") +
                 " degrees from the island's centre, " + chart.DistanceFrom(p).ToString("F0") + " m to go from here by water and on";
-            Log.Info("Sailing: " + Name + " has charted " + (chartArriving ? "her destination's harbour" : "her harbour") + ": " + wet + " of " + chart.Count + " cells water for her hull (" +
-                chartShallow + " her hull fits too shallow for her keel at the sea now, decision 198 g: her keel " + water.KeelDepth.ToString("F2") + " m, " + NavigationWater.KeelMargin.ToString("F2") +
-                " m under it at least, her line wanting " + chart.Depth.Want.ToString("F2") + " m); her way " + (chartArriving ? "in: " : "out leaves the chart ") + exit +
+            Log.Info("Sailing: " + Name + " has charted " + (chartArriving ? "its destination's harbour" : "its harbour") + ": " + wet + " of " + chart.Count + " cells water for its hull (" +
+                chartShallow + " its hull fits too shallow for its keel at the sea now, decision 198 g: its keel " + water.KeelDepth.ToString("F2") + " m, " + NavigationWater.KeelMargin.ToString("F2") +
+                " m under it at least, its line wanting " + chart.Depth.Want.ToString("F2") + " m); its way " + (chartArriving ? "in: " : "out leaves the chart ") + exit +
                 (NavigationMath.Finite(chart.WindFrom) ? ", the wind from " + chart.WindFrom.ToString("F0") + " counted (decision 163)" : "") +
                 " (" + chartMs.ToString("F0") + " ms over " + chartFrames + " frames, the flood " + floodMs.ToString("F0") + " ms over " + floodFrames + " frames; the heap " +
                 Megabytes(chartHeap) + " before, " + Megabytes(GC.GetTotalMemory(false)) + " after; the longest frame while charting " + chartLongest.ToString("F0") + " ms).");
             // Her way closed from where she is: for want of water (the tide), or for good (decision 198 g, TideCheck).
-            if (way.Count == 0 && !chartArriving) WayClosed(p, "her harbour is charted");
+            if (way.Count == 0 && !chartArriving) WayClosed(p, "its harbour is charted");
             return true;
         }
 
@@ -3694,17 +4048,23 @@ namespace ShipwrightAndTransport.Sailing
         // true wind shift over ChartWindShift while she is in it (Chaotic Wind's opposite winds favour opposite exits).
         // Decision 174: too narrow to tack in is also under ChartNarrowLeast metres, whatever her length (a small hull's 3 lengths are
         // under her turning circle: run 20261011-191709 on EQ, the Dhow sent up Dragon Cliffs' north channel, 30-45 m of water, to beat
-        // into a westerly, stalled in its middle for 30 minutes).
+        // into a westerly, stalled in its middle for 30 minutes). The chart's beat takes the least margin a steering earns
+        // (SteeringScatter.Least): a harbour's water is flat, and the ship steers by its own earned margin as it sails.
         internal const double ChartNarrowLengths = 3, ChartNarrowLeast = 60, ChartWindShift = 45, ChartBeatSpeed = 2;
         private RoutePoint chartGoal;
         private double chartBeat = 89;
+        // The chart was flooded for a hull that wears to change sides (HullWears): its beats cost WaterField.WearBeatFactor, its line makes
+        // no tack.
+        private bool chartWears;
         private void FloodChart()
         {
             var wind = Vector3.ProjectOnPlane(Wind.currentWind, Vector3.up);
             double mainSails = NavigationMath.Finite(rigMinimum) ? rigMinimum : EscapeDeadZone;
-            double beat = NavigationMath.Clamp(UpwindLimits.TrueAngle(NavigationMath.Clamp(mainSails, 10, 89), wind.magnitude, ChartBeatSpeed) + Margin, 10, 89);
+            double beat = NavigationMath.Clamp(UpwindLimits.TrueAngle(NavigationMath.Clamp(mainSails, 10, 89), wind.magnitude, ChartBeatSpeed) + SteeringScatter.Least, 10, 89);
             chartBeat = beat;
-            if (wind.sqrMagnitude > 0.01f) chart.SetWind(WindFrom(), beat, Math.Max(ChartNarrowLengths * water.Length, ChartNarrowLeast) / 2, NarrowBeatFor(water.Length));
+            chartWears = HullWears(beat);
+            if (wind.sqrMagnitude > 0.01f) chart.SetWind(WindFrom(), beat, Math.Max(ChartNarrowLengths * water.Length, ChartNarrowLeast) / 2, NarrowBeatFor(water.Length),
+                chartWears ? WaterField.WearBeatFactor : WaterField.BeatFactor);
             var goal = chartGoal;
             // Decision 198 (j): begun here, a slice a frame after (ChartStep for her first, LineStep for a reflood); her chart's old
             // distances serve until it is done. Decision 198 (g): the depth judged at the sea as it stands now. Decision 198 (h): her
@@ -3754,9 +4114,9 @@ namespace ShipwrightAndTransport.Sailing
             bool opens = changes > closing && (tideWait || line == null);
             if (!closesHers && !opens) return;
             FloodChart();
-            refloodWhy = "decision 198 g: the sea " + (now.Sea - was.Sea).ToString("+0.00;-0.00") + " m and her keel " + (now.Keel - was.Keel).ToString("+0.00;-0.00") +
-                " m since her chart was flooded, " + closing + " cells too shallow now and " + (changes - closing) + " deep enough" + (closesHers ? ", by her way ahead" : "");
-            if (closesHers) ReplanLine("the tide: her way ahead is shallower (decision 198 g)");
+            refloodWhy = "decision 198 g: the sea " + (now.Sea - was.Sea).ToString("+0.00;-0.00") + " m and its keel " + (now.Keel - was.Keel).ToString("+0.00;-0.00") +
+                " m since its chart was flooded, " + closing + " cells too shallow now and " + (changes - closing) + " deep enough" + (closesHers ? ", by its way ahead" : "");
+            if (closesHers) ReplanLine("the tide: its way ahead is shallower (decision 198 g)");
             Log.Info("Sailing: " + Name + "'s chart is flooded again for the tide (" + refloodWhy + "), a slice a frame (decision 198 j).");
         }
 
@@ -3788,7 +4148,7 @@ namespace ShipwrightAndTransport.Sailing
             if (chart == null || Job.unberthing || Job.dockingPhase > 0) return false;
             if (chart.Needing)
             {
-                if (!chart.NeedStep(ChartBudgetMs)) { HoldNavigation(dt, 0); Status.Message = "Reckoning her way for the tide."; return true; }
+                if (!chart.NeedStep(ChartBudgetMs)) { HoldNavigation(dt, 0); Status.Message = "Reckoning its way for the tide."; return true; }
                 TideReckoned(p);
             }
             if (!tideWait) return false;
@@ -3798,9 +4158,9 @@ namespace ShipwrightAndTransport.Sailing
             {
                 tideRisen = true; tideGaveUp |= tooLong && !risen;
                 FloodChart();
-                refloodWhy = risen ? "decision 198 g: the sea has risen to " + sea.ToString("F2") + ", her way needing " + (tideNeed - TideMargin).ToString("F2")
-                    : "decision 198 g: no more waiting for the tide after " + TideWaitMost.ToString("F0") + " s (the sea " + sea.ToString("F2") + ", her way needing " + (tideNeed - TideMargin).ToString("F2") + ")";
-                Log.Info("Sailing: " + Name + (risen ? " has the water back: " : " waits no longer for the tide: ") + refloodWhy + "; her chart flooded again.");
+                refloodWhy = risen ? "decision 198 g: the sea has risen to " + sea.ToString("F2") + ", its way needing " + (tideNeed - TideMargin).ToString("F2")
+                    : "decision 198 g: no more waiting for the tide after " + TideWaitMost.ToString("F0") + " s (the sea " + sea.ToString("F2") + ", its way needing " + (tideNeed - TideMargin).ToString("F2") + ")";
+                Log.Info("Sailing: " + Name + (risen ? " has the water back: " : " waits no longer for the tide: ") + refloodWhy + "; its chart flooded again.");
             }
             // Her chart flooded again for the sea she has: she sails on (decision 112).
             if (tideRisen && !chart.Flooding)
@@ -3813,11 +4173,11 @@ namespace ShipwrightAndTransport.Sailing
                 return chart.Needing;
             }
             HoldNavigation(dt, 0);
-            Status.Message = "Waiting for the tide: her way " + (chartArriving ? "in" : "out") + " needs the sea " + Math.Max(0, tideNeed - sea).ToString("F2") + " m higher.";
+            Status.Message = "Waiting for the tide: its way " + (chartArriving ? "in" : "out") + " needs the sea " + Math.Max(0, tideNeed - sea).ToString("F2") + " m higher.";
             if (Time.time >= tideNoteAt)
             {
                 tideNoteAt = Time.time + 60;
-                Log.Info("Sailing: " + Name + " waits for the tide (decision 198 g): the sea at " + sea.ToString("F2") + ", her way needing " + (tideNeed - TideMargin).ToString("F2") +
+                Log.Info("Sailing: " + Name + " waits for the tide (decision 198 g): the sea at " + sea.ToString("F2") + ", its way needing " + (tideNeed - TideMargin).ToString("F2") +
                     " (" + (Time.realtimeSinceStartup - tideWaitSince).ToString("F0") + " s so far).");
             }
             return true;
@@ -3834,11 +4194,11 @@ namespace ShipwrightAndTransport.Sailing
                 if (!tideWait && tideWaitSince < 0) tideWaitSince = Time.realtimeSinceStartup;
                 tideWait = true; tideRisen = false; tideNeed = need + TideMargin; tideNoteAt = Time.time + 60;
                 Log.Info("Sailing: " + Name + "'s way " + (chartArriving ? "in" : "out") + " closes for want of water (" + tideClosedWhen + "): it needs the sea at " + need.ToString("F2") +
-                    ", " + (need - sea).ToString("F2") + " m higher than now; she waits for the tide (decisions 198 g, 112)" + (Job.departureComplete ? "" : ", moored") + ".");
+                    ", " + (need - sea).ToString("F2") + " m higher than now; it waits for the tide (decisions 198 g, 112)" + (Job.departureComplete ? "" : ", moored") + ".");
                 return;
             }
             Log.Info("Sailing: " + Name + "'s way " + (chartArriving ? "in" : "out") + " is closed from here (" + tideClosedWhen + "), not for want of water" +
-                (double.IsPositiveInfinity(need) ? " (no way at any tide)" : "") + "; " + (chartArriving ? "her route takes her in." : "her route as before (decision 157)."));
+                (double.IsPositiveInfinity(need) ? " (no way at any tide)" : "") + "; " + (chartArriving ? "its route takes it in." : "its route as before (decision 157)."));
             if (chartArriving) { inArrivalChart = false; line = null; linePlanner = null; }
             else if (Job.departureComplete) LeaveChart(p, WindFrom());
             else chartLeft = true;
@@ -3849,7 +4209,7 @@ namespace ShipwrightAndTransport.Sailing
         {
             chartLeft = true; line = null; linePlanner = null;
             var route = RoutePlanner.Plan(p, water.ChartGoal(p, NavigationDestination()), water.Clear, windFrom, NoGo);
-            Log.Info("Sailing: " + Name + " is out of her harbour's chart (decision 157); " + (route.Length >= 2 ? "her route from here is planned afresh." : "no route from here: she keeps hers."));
+            Log.Info("Sailing: " + Name + " is out of its harbour's chart (decision 157); " + (route.Length >= 2 ? "its route from here is planned afresh." : "no route from here: it keeps its own."));
             if (route.Length >= 2) ReplaceRoute(route);
         }
 
@@ -3866,7 +4226,7 @@ namespace ShipwrightAndTransport.Sailing
             if (!chart.Inside(p, ChartBeyond) || !NavigationMath.Finite(chart.DistanceFrom(p)))
             {
                 // Decision 198 (g): her chart's water closed round her (the tide fell): first whether it is for want of water.
-                if (chart.Inside(p, ChartBeyond) && !tideGaveUp && chart.Depth.Known) { WayClosed(p, "the water round her closed"); return true; }
+                if (chart.Inside(p, ChartBeyond) && !tideGaveUp && chart.Depth.Known) { WayClosed(p, "the water round its closed"); return true; }
                 LeaveChart(p, windFrom);
                 return false;
             }
@@ -3878,9 +4238,10 @@ namespace ShipwrightAndTransport.Sailing
             if (!chart.Flooding && NavigationMath.Finite(chart.WindFrom) && Math.Abs(NavigationMath.Delta(chart.WindFrom, windFrom)) > ChartWindShift)
             {
                 double was = chart.WindFrom;
+                ReopenUnsailable();
                 FloodChart();
                 refloodWhy = "decision 163: the wind from " + was.ToString("F0") + " now from " + windFrom.ToString("F0");
-                Log.Info("Sailing: " + Name + " reckons her way " + (chartArriving ? "in" : "out") + " again (" + refloodWhy + "); her chart flooded again a slice a frame (decision 198 j).");
+                Log.Info("Sailing: " + Name + " reckons its way " + (chartArriving ? "in" : "out") + " again (" + refloodWhy + "); its chart flooded again a slice a frame (decision 198 j).");
             }
             var path = chart.Descent(p, ChartReach);
             if (path.Count == 0) return true;
@@ -3905,7 +4266,7 @@ namespace ShipwrightAndTransport.Sailing
                 harbourLogAt = Time.time + 10; harbourLogged = harbourGuide;
                 Log.Info("Sailing: " + Name + "'s harbour guide " + RoutePoint.Distance(p, harbourGuide).ToString("F0") + " m off at " +
                     NavigationMath.Heading(harbourGuide.x - p.x, harbourGuide.z - p.z).ToString("F0") + " (decision 157; " + chart.DistanceFrom(p).ToString("F0") + " m to go by water and on" +
-                    (pick < path.Count - 1 || path.Count < 2 ? "" : ", as far down as she looks") + (wide ? "" : ", no line " + ChartSpare.ToString("F0") + " m wider than her hull") + ").");
+                    (pick < path.Count - 1 || path.Count < 2 ? "" : ", as far down as it looks") + (wide ? "" : ", no line " + ChartSpare.ToString("F0") + " m wider than its hull") + ").");
             }
             return true;
         }
@@ -3924,20 +4285,64 @@ namespace ShipwrightAndTransport.Sailing
             int closed = chart.CloseWay(p, length, ChartFailLengths * length, length);
             if (closed == 0) return false;
             FloodChart();
-            refloodWhy = "decision 195: her way out failed, " + closed + " cells of it closed";
+            refloodWhy = "decision 195: its way out failed, " + closed + " cells of it closed";
             harbourGuideAt = 0;
-            ReplanLine("her way out failed here (decision 195)");
-            Log.Info("Sailing: " + Name + "'s way out failed here: " + closed + " cells of it closed in her chart and her way reckoned again (decision 195), a slice a frame (decision 198 j).");
+            ReplanLine("its way out failed here (decision 195)");
+            Log.Info("Sailing: " + Name + "'s way out failed here: " + closed + " cells of it closed in its chart and its way reckoned again (decision 195), a slice a frame (decision 198 j).");
             return true;
         }
 
+        // A new line out with a stretch the ship can't sail in this wind (LineJudge: within its close-hauled, the rig's least angle and the
+        // margin its steering has earned turned to the true wind at ChartBeatSpeed, never under the chart's beat; in water too narrow to tack
+        // in; longer than the ship), from a length and its stopping distance ahead: that stretch's water closed in the chart (within the
+        // ship's length of each point, the water within its length of the ship kept), the chart flooded again and the line planned again,
+        // the chart's guide leading meanwhile. At most UnsailableClosings a wind; true when the line is not taken.
+        private bool CloseUnsailable(List<LinePoint> planned)
+        {
+            if (unsailableOff || unsailableCount >= UnsailableClosings || planned == null || planned.Count < 2) return false;
+            var wind = Vector3.ProjectOnPlane(Wind.currentWind, Vector3.up);
+            if (wind.sqrMagnitude < 0.01f) return false;
+            double length = Math.Max(10, water.Length), windFrom = WindFrom();
+            double mainSails = NavigationMath.Finite(rigMinimum) ? rigMinimum : EscapeDeadZone;
+            double closeHauled = Math.Max(chartBeat, NavigationMath.Clamp(UpwindLimits.TrueAngle(NavigationMath.Clamp(mainSails + Margin, 10, 89), wind.magnitude, ChartBeatSpeed), 10, 89));
+            float sog = Vector3.ProjectOnPlane(boat.Body.velocity, Vector3.up).magnitude;
+            double from = Math.Max(length, sog * StopSeconds) + length;
+            if (!LineJudge.Unsailable(planned, from, windFrom, closeHauled, chart.NarrowClearance, length, out double start, out double end)) return false;
+            var p = Point(boat.StablePosition);
+            int closed = 0;
+            foreach (var q in planned)
+                if (q.Along >= start && q.Along <= end) closed += chart.CloseAround(q.Point, length, p, length, unsailableClosed);
+            if (closed == 0) return false;
+            unsailableCount++; unsailableCheck = true;
+            FloodChart();
+            refloodWhy = "a way it can't sail in this wind closed, " + closed + " cells";
+            line = null; harbourGuideAt = 0; narrowHold.Clear(); narrowAt = 0;
+            lineReplanWhy = "its way out reckoned again past a way it can't sail in this wind"; lineReplanAt = Time.time + LineReplanSeconds;
+            Log.Info("Sailing: " + Name + " can't sail its line out in this wind: " + (end - start).ToString("F0") + " m of it, " + start.ToString("F0") + " to " + end.ToString("F0") +
+                " m along, lie within its close-hauled (" + closeHauled.ToString("F1") + " degrees off the true wind from " + windFrom.ToString("F0") + ") where the water is too narrow to tack in (under " +
+                chart.NarrowClearance.ToString("F0") + " m clear); that way closed in its chart (" + closed + " cells) and another reckoned before it commits (the user's rule), a slice a frame (decision 198 j).");
+            return true;
+        }
+
+        // The ways closed for a wind opened again when the wind shifts past the flood's own (decision 163), and the judging starts afresh.
+        private void ReopenUnsailable()
+        {
+            if (unsailableClosed.Count > 0) chart.Reopen(unsailableClosed);
+            unsailableClosed.Clear(); unsailableCount = 0; unsailableOff = false; unsailableCheck = false;
+        }
+
         // Decision 198 (a, b, c): her line out of her harbour, planned on her chart with her own turning circle (LinePlanner, TurnCircle),
-        // a slice a frame (LineBudgetMs), once she is off the dock; her guide a point on it LineLookLengths of her length ahead (or
-        // LineLookSeconds of her speed when longer); planned again when she is LineOffShare of her spare off it, steers LineHeadingOff
+        // a slice a frame (LineBudgetMs), once the ship is off the dock; its guide a point on it LineGuideAhead's distance ahead;
+        // planned again when it is LineOffShare of its spare off it, steers LineHeadingOff
         // off its way for LineHeadingSeconds, the true wind shifts LineWindShift, or her way out fails (195 b), at most every
         // LineReplanSeconds. No line found: her chart's guide as before (157), the search tried again after LineRetrySeconds; where her
         // own way then fails, the backup tow (198 f, TowWhole).
-        internal const double LineLookLengths = 1, LineLookSeconds = 2.5, LineOffShare = 0.5, LineHeadingOff = 15, LineWindShift = 15, LineGuideTolerance = 25;
+        internal const double LineLookLengths = 1, LineLookSeconds = 4, LineOffShare = 0.5, LineHeadingOff = 15, LineWindShift = 15, LineGuideTolerance = 25;
+        // Off the line counts from twice the ship's own cross-track spread on it (its root mean square over about LineSpreadSeconds), at
+        // least LineOffShare of its spare and at most all of it, and only while the ship isn't closing on the line (its offset falling
+        // faster than LineClosing m/s). Its guide never lies past a turn on the line that begins nearer than both its look-ahead and its
+        // planned circle (one length ahead at least).
+        internal const double LineSpreadSeconds = 30, LineClosing = 0.05;
         private const double LineBudgetMs = 3;
         private const float LineHeadingSeconds = 5, LineReplanSeconds = 10, LineRetrySeconds = 30;
         private TurnCircle turnCircle;
@@ -3945,8 +4350,19 @@ namespace ShipwrightAndTransport.Sailing
         private List<LinePoint> line;
         private int lineAt;
         private double lineWind = double.NaN;
+        // The line search under way began beyond ArrivalLineFrom by water from the approach point.
+        private bool lineFar;
+        // A way out the ship can't sail in the wind (LineJudge): the chart's cells closed for it, the closings this wind, whether the
+        // flood after a closing is to be checked for a way from the ship, and the judging left off (no other way) until the wind shifts.
+        internal const int UnsailableClosings = 2;
+        private readonly List<int> unsailableClosed = new List<int>();
+        private int unsailableCount;
+        private bool unsailableCheck, unsailableOff;
         private string lineReplanWhy;
-        private float lineRetryAt, lineReplanAt, lineHeadingOffSince = -1, lineLogAt;
+        private float lineRetryAt, lineReplanAt, lineHeadingOffSince = -1, lineLogAt, lineSampleAt = -1;
+        private double lineSpreadSq, lineLastOff = double.NaN, lineOffRate;
+        // The line search under way began on the old line's way (ReplanStart); none found, it begins again on the bow's heading.
+        private bool lineFromWay;
         internal TurnCircle Circle => turnCircle ?? (turnCircle = TurnCircle.For(RigDescriptor(boat)));
         // Decision 201 (d): her hull's length without her bowsprit, for her circle until it is measured: her stored length
         // (Storage.LengthOf, kept in her booking), else her length as measured.
@@ -3968,50 +4384,79 @@ namespace ShipwrightAndTransport.Sailing
                 var p = Point(boat.StablePosition);
                 var again = chart.Descent(p, 1e7);
                 var middle = chart.Centre(chart.Count / 2 + chart.Width / 2);
-                Log.Info("Sailing: " + Name + "'s chart flooded again (" + (refloodWhy ?? "her way reckoned again") + "; " + floodMs.ToString("F0") + " ms over " + floodFrames +
+                Log.Info("Sailing: " + Name + "'s chart flooded again (" + (refloodWhy ?? "its way reckoned again") + "; " + floodMs.ToString("F0") + " ms over " + floodFrames +
                     " frames, the heap " + Megabytes(floodHeap) + " before, " + Megabytes(GC.GetTotalMemory(false)) + " after, the longest frame " + floodLongest.ToString("F0") + " ms): " +
-                    (chartArriving ? "her way in " + (again.Count == 0 ? "doesn't reach her here" : chart.DistanceFrom(p).ToString("F0") + " m by water to her approach point") :
-                    "her way out leaves it " + (again.Count == 0 ? "nowhere from here" : NavigationMath.Heading(again[again.Count - 1].x - middle.x, again[again.Count - 1].z - middle.z).ToString("F0") +
+                    (chartArriving ? "its way in " + (again.Count == 0 ? "doesn't reach it here" : chart.DistanceFrom(p).ToString("F0") + " m by water to its approach point") :
+                    "its way out leaves it " + (again.Count == 0 ? "nowhere from here" : NavigationMath.Heading(again[again.Count - 1].x - middle.x, again[again.Count - 1].z - middle.z).ToString("F0") +
                     " degrees from the island's centre, " + chart.DistanceFrom(p).ToString("F0") + " m by water and on")) + ".");
                 refloodWhy = null;
+                // A closed way that leaves the ship no way out: opened again, and its way sailed as before until the wind shifts.
+                if (unsailableCheck)
+                {
+                    unsailableCheck = false;
+                    if (again.Count == 0)
+                    {
+                        chart.Reopen(unsailableClosed);
+                        Log.Info("Sailing: " + Name + " has no other way out: the " + unsailableClosed.Count + " cells closed for the wind opened again, its chart flooded again, and it sails the way it has.");
+                        unsailableClosed.Clear(); unsailableOff = true;
+                        FloodChart(); refloodWhy = "no other way out, the closed way opened again";
+                        return;
+                    }
+                }
             }
             // Decision 198 (g, h): no line while her way is reckoned for the tide or waited for, nor in her final approach; arriving, not
             // until she is within ArrivalLineFrom of her approach point by water.
             if (!InHarbourChart || water == null || !Job.departureComplete || Job.unberthing || backing || Job.dockingPhase > 0 || chart.Needing || tideWait) return;
-            if (chartArriving && linePlanner == null && line == null && chart.DistanceFrom(Point(boat.StablePosition)) > ArrivalLineFrom) return;
+            if (chartArriving && linePlanner == null && line == null && chart.DistanceFrom(Point(boat.StablePosition)) > Math.Max(ArrivalLineFrom, wayInFrom)) return;
             if (linePlanner == null)
             {
                 if (line != null && lineReplanWhy == null) return;
                 if (line == null && lineReplanWhy == null && Time.time < lineRetryAt) return;
-                StartLine(lineReplanWhy ?? (lineRetryAt > 0 ? "tried again" : "her chart is ready"));
+                StartLine(lineReplanWhy ?? (lineRetryAt > 0 ? "tried again" : "its chart is ready"));
                 return;
             }
             if (!linePlanner.Step(LineBudgetMs)) return;
             var done = linePlanner; linePlanner = null; lineReplanWhy = null;
+            if (done.Failed && lineFromWay)
+            {
+                lineFromWay = false;
+                StartLine((done.Goal != null ? "no line in" : "no line out") + " begun on the old line's way (" + done.Why + "); begun on the bow's heading", false);
+                return;
+            }
             if (done.Failed)
             {
                 lineRetryAt = Time.time + LineRetrySeconds;
+                // A failed search from beyond ArrivalLineFrom isn't tried from there again on this flood.
+                if (lineFar) wayInFrom = 0;
                 Log.Info("Sailing: " + Name + " finds no line " + (done.Goal != null ? "in" : "out") + " (decision 198 b: " + done.Why + ", " + done.Milliseconds.ToString("F0") + " ms over the frames)" +
-                    (line != null ? "; she keeps the line she has." : "; her chart's guide as before (decision 157), tried again in " + LineRetrySeconds.ToString("F0") + " s."));
+                    (line != null ? "; it keeps the line it has." : "; its chart's guide as before (decision 157), tried again in " + LineRetrySeconds.ToString("F0") + " s."));
                 return;
             }
-            line = done.Line; lineAt = 0; lineHeadingOffSince = -1; harbourGuideAt = 0;
+            if (done.Goal == null && CloseUnsailable(done.Line)) return;
+            line = done.Line; lineAt = 0; lineHeadingOffSince = -1; harbourGuideAt = 0; lineSpreadSq = 0; lineLastOff = double.NaN; lineOffRate = 0; lineSampleAt = -1;
             // A held cut was measured along the old line (198 d): read again on this one.
-            narrowHoldWanted = double.NaN; narrowHoldAlong = double.NaN; narrowAt = 0;
+            narrowHold.Clear(); narrowAt = 0;
             int turns = 0; double least = double.PositiveInfinity;
             for (int k = 1; k < line.Count; k++) { if (line[k].Turn != 0 && line[k - 1].Turn == 0) turns++; least = Math.Min(least, line[k].Clearance); }
             var last = line[line.Count - 1];
             int lastCell = chart.IndexOf(last.Point);
-            Log.Info("Sailing: " + Name + " has her line " + (done.Goal != null ? "in" : "out") + " (decision 198): " + last.Along.ToString("F0") + " m to " +
-                (done.Goal != null ? "her approach point (" + RoutePoint.Distance(last.Point, done.Goal.At).ToString("F0") + " m off it, heading " + last.Heading.ToString("F0") + ", her berth's way " + done.Goal.Heading.ToString("F0") + ")" :
-                lastCell < 0 || chart.OnEdge(lastCell) ? "her chart's edge" : "open water") +
-                ", " + turns + " turns, the least clearance on it " + least.ToString("F0") + " m (her spare " + done.Spare.ToString("F1") + " m), first heading " +
+            Log.Info("Sailing: " + Name + " has its line " + (done.Goal != null ? "in" : "out") + " (decision 198): " + last.Along.ToString("F0") + " m to " +
+                (done.Goal != null ? "its approach point (" + RoutePoint.Distance(last.Point, done.Goal.At).ToString("F0") + " m off it, heading " + last.Heading.ToString("F0") + ", its berth's way " + done.Goal.Heading.ToString("F0") + ")" :
+                lastCell < 0 || chart.OnEdge(lastCell) ? "its chart's edge" : "open water") +
+                ", " + turns + " turns, the least clearance on it " + least.ToString("F0") + " m (its spare " + done.Spare.ToString("F1") + " m), first heading " +
                 line[Math.Min(line.Count - 1, 3)].Heading.ToString("F0") + " (" + done.States + " states, " + done.Milliseconds.ToString("F0") + " ms over the frames).");
         }
 
-        private void StartLine(string why)
+        // `fromWay`: a line planned again begins on the old line's way where the ship lies on it, its bow within LineHeadingOff of that way
+        // (its swing about it isn't a turn of the new line's own); else on the bow's heading.
+        private void StartLine(string why, bool fromWay = true)
         {
             var p = Point(boat.StablePosition);
+            double bow = boat.Root.eulerAngles.y, start = bow;
+            lineFromWay = false;
+            if (fromWay && line != null && lineAt >= 0 && lineAt < line.Count && RoutePoint.Distance(p, line[lineAt].Point) <= LinePlanner.SpareFor(Math.Max(10, water.Length)) &&
+                Math.Abs(NavigationMath.Delta(bow, line[lineAt].Heading)) <= LineHeadingOff)
+            { start = line[lineAt].Heading; lineFromWay = true; }
             double length = Math.Max(10, water.Length), half = Math.Max(0.5, water.Radius);
             var c = Circle;
             // The wind she has now, her no-go off it as the flood counted hers.
@@ -4020,10 +4465,41 @@ namespace ShipwrightAndTransport.Sailing
             lineWind = windNow;
             // Decision 198 (h): her line in ends at her approach point (her chart's flood goal), heading along her berth.
             var goal = chartArriving && chart.HasGoal ? new LineGoal(chart.FloodGoal, Job.dockHeading, Math.Max(ArrivalGoalLeast, length / 2), ArrivalGoalTolerance) : null;
-            linePlanner = new LinePlanner(chart, p, boat.Root.eulerAngles.y, length, half, c.Plan(true, length, HullWithoutBowsprit), c.Plan(false, length, HullWithoutBowsprit),
-                windNow, NavigationMath.Finite(windNow) ? chartBeat : double.NaN, goal);
-            Log.Info("Sailing: " + Name + " plans her line " + (goal != null ? "in" : "out") + " (decision 198, " + why + "): her circle " + c.Describe(length, HullWithoutBowsprit) + ", her spare " + linePlanner.Spare.ToString("F1") + " m each side.");
+            lineFar = goal != null && chart.DistanceFrom(p) > ArrivalLineFrom;
+            linePlanner = new LinePlanner(chart, p, start, length, half, c.Plan(true, length, HullWithoutBowsprit), c.Plan(false, length, HullWithoutBowsprit),
+                windNow, NavigationMath.Finite(windNow) ? chartBeat : double.NaN, goal, chartWears);
+            Log.Info("Sailing: " + Name + " plans its line " + (goal != null ? "in" : "out") + " (decision 198, " + why + "): its circle " + c.Describe(length, HullWithoutBowsprit) + ", its spare " + linePlanner.Spare.ToString("F1") + " m each side" +
+                (chartWears ? "; it wears to change sides, so its line makes no tack (stage 33 e3)" : "") + ".");
         }
+
+        // How far off its line the ship counts as off it: twice its cross-track spread `spread`, within LineOffShare of `spare` and all of it.
+        internal static double LineOffLimit(double spread, double spare) => NavigationMath.Clamp(2 * spread, LineOffShare * spare, spare);
+        // The guide's distance ahead on the line: LineLookLengths of the hull's `length`, LineLookSeconds of its `speed`, or the run while its
+        // helm goes over (1 / HeadingController.Slew seconds) and it turns LineHeadingOff at TurnCircle.ReserveRate of its full-helm turn
+        // (`fullRate`, degrees a second at that speed), whichever is longest.
+        internal static double LineGuideAhead(double length, double speed, double fullRate) =>
+            Math.Max(Math.Max(LineLookLengths * length, LineLookSeconds * speed),
+                fullRate > 0 && speed > 0 ? speed * (1 / HeadingController.Slew + LineHeadingOff / (TurnCircle.ReserveRate * fullRate)) : 0);
+        // The guide's distance `ahead` from point `best`, brought back to a turn on the line that begins nearer than both it and the planned
+        // `circle`, `least` at least.
+        internal static double GuideBeforeTurn(IList<LinePoint> line, int best, double ahead, double least, double circle)
+        {
+            for (int k = best; k < line.Count && line[k].Along - line[best].Along < Math.Min(ahead, circle); k++)
+                if (line[k].Turn != 0) return Math.Max(least, line[k].Along - line[best].Along);
+            return ahead;
+        }
+        // The off-line limit where the water leaves `room` beyond the hull's full room: the larger of that and LineOffLimit, but within the
+        // slow-in (`slowIn`) LineOffLimit alone.
+        internal static double LineOffLimitAt(double spread, double spare, double room, bool slowIn) =>
+            slowIn ? LineOffLimit(spread, spare) : Math.Max(LineOffLimit(spread, spare), room);
+
+        // The way ahead on the harbour line's beat: the stopping distance and the room to tack the line was planned with, more where the
+        // line's water (`clearance`) gives it, never beyond the look-ahead. `lineBeatRoom`: the line's clearance at the ship's point on a
+        // beat leg, NaN off one.
+        internal static double BeatLook(double look, double stopping, double tackRoom, double clearance) =>
+            Math.Min(look, Math.Max(stopping + tackRoom, clearance));
+        private double lineBeatRoom = double.NaN;
+        private bool beatLookNoted;
 
         // Her line planned again from where she is (her old line kept meanwhile).
         private void ReplanLine(string why)
@@ -4047,13 +4523,14 @@ namespace ShipwrightAndTransport.Sailing
             var at = line[best];
             if (best >= line.Count - 2)
             {
-                line = null; harbourGuideAt = 0;
-                Log.Info("Sailing: " + Name + " is at the end of her line (decision 198); her chart's guide takes her on.");
+                line = null; harbourGuideAt = 0; approachAgain = false;
+                Log.Info("Sailing: " + Name + " is at the end of its line (decision 198); its chart's guide takes it on.");
                 return false;
             }
             double length = Math.Max(10, water.Length), spare = Math.Max(LinePlanner.TurnSpareLeast, LinePlanner.TurnSpareLengths * length);
             float sog = Vector3.ProjectOnPlane(boat.Body.velocity, Vector3.up).magnitude;
-            double ahead = Math.Max(LineLookLengths * length, LineLookSeconds * sog);
+            double carry = CarrySpeed(sog);
+            double ahead = GuideBeforeTurn(line, best, LineGuideAhead(length, carry, FullHelmTurnAt(carry)), LineLookLengths * length, MyTurnRadius());
             int g = best;
             while (g < line.Count - 1 && line[g].Along - at.Along < ahead) g++;
             harbourGuide = line[g].Point;
@@ -4062,13 +4539,25 @@ namespace ShipwrightAndTransport.Sailing
             // Why plan it again (decision 198 b): off it, steering off its way, or the wind shifted. Not off it on a beat (she tacks across
             // its way), nor while she tacks, wears, gathers way or waits to tack.
             bool beatLeg = NavigationMath.Finite(lineWind) && Math.Abs(NavigationMath.Delta(windFrom, at.Heading)) < chartBeat;
+            lineBeatRoom = beatLeg ? at.Clearance : double.NaN;
             bool turning = navigator != null && (navigator.State == Manoeuvre.Tacking || navigator.State == Manoeuvre.Wearing || navigator.Gathering || navigator.WaitingToTack);
             double toGuide = NavigationMath.Heading(harbourGuide.x - p.x, harbourGuide.z - p.z), headingOff = Math.Abs(NavigationMath.Delta(boat.Root.eulerAngles.y, toGuide));
             if (headingOff <= LineHeadingOff || beatLeg || turning || sog < 1) lineHeadingOffSince = -1;
             else if (lineHeadingOffSince < 0) lineHeadingOffSince = Time.time;
+            float lineDt = lineSampleAt < 0 ? 0 : Time.time - lineSampleAt;
+            lineSampleAt = Time.time;
+            if (lineDt > 0 && NavigationMath.Finite(lineLastOff))
+            {
+                lineSpreadSq += (off * off - lineSpreadSq) * Math.Min(1, lineDt / LineSpreadSeconds);
+                lineOffRate += ((off - lineLastOff) / lineDt - lineOffRate) * Math.Min(1, lineDt / 2);
+            }
+            lineLastOff = off;
+            // In water wider than the hull's full room, off counts only once it eats into what the water leaves it, but not within the slow-in.
+            bool slowIn = chartArriving && Job.berthKnown && SlowInDistance() < ArrivalSail.SlowFrom;
+            double offLimit = LineOffLimitAt(Math.Sqrt(lineSpreadSq), spare, at.Clearance - LinePlanner.FullRoom(length, Math.Max(0.5, water.Radius)), slowIn);
             string why = null;
-            if (!beatLeg && !turning && off > LineOffShare * spare) why = "she is " + off.ToString("F0") + " m off her line";
-            else if (lineHeadingOffSince >= 0 && Time.time - lineHeadingOffSince > LineHeadingSeconds) why = "she steers " + headingOff.ToString("F0") + " degrees off her line's way";
+            if (!beatLeg && !turning && off > offLimit && lineOffRate > -LineClosing) why = "it is " + off.ToString("F0") + " m off its line (its limit " + offLimit.ToString("F1") + " m)";
+            else if (lineHeadingOffSince >= 0 && Time.time - lineHeadingOffSince > LineHeadingSeconds) why = "it steers " + headingOff.ToString("F0") + " degrees off its line's way";
             else if (NavigationMath.Finite(lineWind) && Math.Abs(NavigationMath.Delta(lineWind, windFrom)) > LineWindShift) why = "the wind shifted " + Math.Abs(NavigationMath.Delta(lineWind, windFrom)).ToString("F0") + " degrees";
             // Decision 198 (f): a commit point her stopping distance and a length before narrow water on her line (196's: under
             // NarrowLengths of her lengths clear). She goes in on her line (LineOffShare of her spare), her heading within LineHeadingOff
@@ -4082,8 +4571,8 @@ namespace ShipwrightAndTransport.Sailing
                     if (line[k].Clearance >= ArrivalSail.NarrowLengths * length) continue;
                     if (line[best].Clearance < ArrivalSail.NarrowLengths * length) break;
                     double wayOff = Math.Abs(NavigationMath.Delta(boat.Root.eulerAngles.y, at.Heading));
-                    string not = off > LineOffShare * spare ? off.ToString("F0") + " m off her line" :
-                        wayOff > LineHeadingOff ? "her heading " + wayOff.ToString("F0") + " degrees off its way" :
+                    string not = off > LineOffShare * spare ? off.ToString("F0") + " m off its line" :
+                        wayOff > LineHeadingOff ? "its heading " + wayOff.ToString("F0") + " degrees off its way" :
                         !LinePartClear(k, 2 * length) ? "something lies in it (" + water.Obstruction + ")" : null;
                     if (not != null) why = "not ready for the narrow water " + (line[k].Along - at.Along).ToString("F0") + " m ahead: " + not;
                     break;
@@ -4093,17 +4582,33 @@ namespace ShipwrightAndTransport.Sailing
             {
                 // A shift past the flood's own (decision 163): her chart flooded again for it first.
                 if (!chart.Flooding && NavigationMath.Finite(chart.WindFrom) && Math.Abs(NavigationMath.Delta(chart.WindFrom, windFrom)) > ChartWindShift)
-                { FloodChart(); refloodWhy = "decision 163: the wind from " + chart.WindFrom.ToString("F0") + ", on her line"; }
+                { ReopenUnsailable(); FloodChart(); refloodWhy = "decision 163: the wind from " + chart.WindFrom.ToString("F0") + ", on its line"; }
                 ReplanLine(why);
             }
             if (Time.time >= lineLogAt)
             {
                 lineLogAt = Time.time + 10;
-                Log.Info("Sailing: " + Name + " on her line (decision 198): " + at.Along.ToString("F0") + " of " + line[line.Count - 1].Along.ToString("F0") + " m, " + off.ToString("F1") +
-                    " m off it, its way " + at.Heading.ToString("F0") + ", her guide " + RoutePoint.Distance(p, harbourGuide).ToString("F0") + " m ahead at " + toGuide.ToString("F0") +
+                Log.Info("Sailing: " + Name + " on its line (decision 198): " + at.Along.ToString("F0") + " of " + line[line.Count - 1].Along.ToString("F0") + " m, " + off.ToString("F1") +
+                    " m off it, its way " + at.Heading.ToString("F0") + ", its guide " + RoutePoint.Distance(p, harbourGuide).ToString("F0") + " m ahead at " + toGuide.ToString("F0") +
                     ", the water there " + at.Clearance.ToString("F0") + " m clear" + (why != null ? "; planned again: " + why : "") + ".");
             }
             return true;
+        }
+
+        // The line's legs from the nearest point on for `metres`, every second point (4 m), for decision 153's choice on the line: each
+        // leg's heading off the apparent wind (from `apparentFrom`) and its length. False when the line has none left.
+        private readonly List<double> stretchHeadings = new List<double>(), stretchLengths = new List<double>();
+        private bool LineStretch(double apparentFrom, double metres)
+        {
+            stretchHeadings.Clear(); stretchLengths.Clear();
+            if (line == null) return false;
+            double start = line[lineAt].Along;
+            for (int k = lineAt; k + 2 < line.Count && line[k].Along - start < metres; k += 2)
+            {
+                stretchHeadings.Add(NavigationMath.Delta(apparentFrom, line[k].Heading));
+                stretchLengths.Add(line[k + 2].Along - line[k].Along);
+            }
+            return stretchHeadings.Count > 0;
         }
 
         // Her line from point `from` on for `metres` clear of what lies there (her hull swept, the seabed, a boat lying still: decision
@@ -4145,7 +4650,7 @@ namespace ShipwrightAndTransport.Sailing
         private double PushDistance(RoutePoint p, double heading, double pushBearing, out string how)
         {
             double full = Unberthing.PushOff(water.Length), end = Math.Max(0, water.Length / 2 - water.Radius);
-            how = "her length";
+            how = "its length";
             var along = new[] { 0.0, end, -end };
             bool clear = true;
             foreach (double a in along)
@@ -4166,18 +4671,55 @@ namespace ShipwrightAndTransport.Sailing
                 if (least < 0) break;
                 if (least > best) { best = least; bestAt = d; }
             }
-            how = "the middle of the waterway, her length not clear (decision 198 i)";
+            how = "the middle of the waterway, its length not clear (decision 198 i)";
             return bestAt;
         }
 
-        // Her turning circle for a check (decision 198 a): measured, the larger way's tightest. Decision 209 (b): until measured, decision
-        // 201 (d)'s, twice her hull's length without her bowsprit, at any speed: never 169's rule (her speed over 5 degrees a second),
-        // which made a slow ship's circle look small (the Brig turns on 54-61 m from 0.8 to 4 m/s, the Sanbuq wider when slow).
+        // Her turning circle for a check (decision 198 a): measured, the larger way's tightest. Until measured, the physical circle
+        // (TurnCircle.Physical), else decision 201 (d)'s, twice her hull's length without her bowsprit; at any speed: never 169's rule (her
+        // speed over 5 degrees a second), which made a slow ship's circle look small.
         private double MyTurnRadius()
         {
             double length = Math.Max(10, water.Length);
             var c = Circle;
-            return c.Measured(true) || c.Measured(false) ? c.PlanEither(length, HullWithoutBowsprit) * TurnCircle.ReserveRate : TurnCircle.DefaultLengths * HullWithoutBowsprit;
+            return c.Measured(true) || c.Measured(false) ? c.PlanEither(length, HullWithoutBowsprit) * TurnCircle.ReserveRate
+                : c.Physical > 0 ? Math.Max(length * 0.5, c.Physical) : TurnCircle.DefaultLengths * HullWithoutBowsprit;
+        }
+
+        // The speed the hull carries: `speed`, or the speed the wind alone drives it at along its heading with its sails furled
+        // (ArrivalSail.WindDrift from its own BoatWind, Crest drag and mass, read once a second), the larger.
+        private BoatWind windage;
+        private float driftAt;
+        private double driftNow;
+        private double CarrySpeed(double speed)
+        {
+            if (Time.time >= driftAt && boat?.Body != null)
+            {
+                driftAt = Time.time + 1;
+                if (!windage) windage = boat.Root.GetComponent<BoatWind>();
+                if (!waterDrag) waterDrag = boat.Root.GetComponent<Crest.BoatProbes>();
+                var wind = Wind.currentWind;
+                driftNow = windage && waterDrag ? ArrivalSail.WindDrift(waterDrag._dragInWaterForward, wind.x, wind.z, boat.Root.eulerAngles.y,
+                    windage.frontForce, windage.sideForce, boat.Body.mass) : 0;
+            }
+            return Math.Max(speed, driftNow);
+        }
+
+        // The hull's turn for full helm (degrees a second) at `speed` ahead by Unity's law (HullTurn); NaN where its rudder or body isn't read.
+        private double FullHelmTurnAt(double speed) => sails?.Rudder != null && boat?.Body != null && boat.Body
+            ? HullTurn.FullHelmRate(sails.Rudder.Strength(speed), sails.Rudder.FullAngle, boat.Body.angularDrag, HullTurn.YawInertia(boat.Body)) : double.NaN;
+
+        // A hull that changes sides by wearing: its tacks lost on this voyage (TackNavigator.WearsOnly), or a tack from close-hauled to close-hauled (`beatOff` degrees off
+        // the true wind each side) too long at its speed ahead now, at least TackNavigator.PlanTackSpeed.
+        private bool HullWears(double beatOff) => keptWearsOnly || (navigator?.WearsOnly ?? false) ||
+            TackNavigator.TackTooLong(beatOff, 2 * beatOff, FullHelmTurnAt(Math.Max(TackNavigator.PlanTackSpeed, boat?.Body != null && boat.Body ? Vector3.Dot(boat.Body.velocity, boat.Root.forward) : 0)));
+
+        // The physical circle (TurnCircle.Physical) from the hull as it is now: its mass and cargo change its inertia.
+        private void UpdatePhysicalCircle(double yawInertia)
+        {
+            if (sails?.Rudder == null || boat?.Body == null) return;
+            double r = HullTurn.Circle(boat.Body.angularDrag, yawInertia, sails.Rudder.Power, sails.Rudder.FullAngle);
+            if (r > 0) Circle.Physical = r * TurnCircle.SailsShare;
         }
 
         // Decision 196 (ArrivalSail.NarrowSpeed, TurnAhead): her sail capped in narrow water only for a turn she knows is coming (the
@@ -4190,11 +4732,6 @@ namespace ShipwrightAndTransport.Sailing
         internal const double NarrowAheadLengths = 3, NarrowLookSeconds = 30;
         private const float NarrowEvery = 1;
         private float narrowAt, narrowShare = 1, narrowNoteAt;
-        // Narrow water along her way (NarrowSailLimit: under NarrowLengths of her lengths of clearance within her look-ahead, turn or
-        // none): she keeps her helm (Voyage.UpdateHelmHold), never lets it go to the game's rudder (decision 132). Run 20261012-125559:
-        // let go mid-turn, the rudder eased from 0.43 to 0.31 and her turn died 13 m short of Cube_005; run 20261012-130913, a turn only
-        // kept it: let go before a 20-degree bend in Dragon Cliffs' 26 m eastern gap, she drifted onto Cube_005 at 2.6 m/s.
-        private bool narrowTurn;
         // The turn lead (ArrivalSail.TurnLead): her way's heading round the turn once she is within its lead; NaN when none.
         private double narrowLead = double.NaN;
         private float narrowLeadNoteAt, narrowLeadAt;
@@ -4202,9 +4739,11 @@ namespace ShipwrightAndTransport.Sailing
         {
             if (boat?.Body == null || water == null) return 1;
             if (navigator != null && (navigator.WaitingToTack || navigator.State == Manoeuvre.Tacking || navigator.Gathering)) return 1;
+            // The final approach in the destination's chart runs straight along its line: no turn ahead to slow for.
+            if (Job != null && Job.dockingPhase >= 1 && InHarbourChart) { narrowShare = 1; narrowLead = double.NaN; return 1; }
             if (Time.time < narrowAt) return narrowShare;
             narrowAt = Time.time + NarrowEvery;
-            narrowShare = 1; narrowTurn = false; narrowLead = double.NaN;
+            narrowShare = 1; narrowLead = double.NaN;
             var p = Point(boat.StablePosition);
             double length = Math.Max(10, water.Length);
             float sog = Vector3.ProjectOnPlane(boat.Body.velocity, Vector3.up).magnitude;
@@ -4223,17 +4762,6 @@ namespace ShipwrightAndTransport.Sailing
                 way.Add(NavigationDestination());
             }
             else return Held(sog);
-            double alongClear = double.PositiveInfinity;
-            if (charted)
-            {
-                foreach (var c in way)
-                {
-                    if (RoutePoint.Distance(p, c) > look) break;
-                    alongClear = Math.Min(alongClear, chart.ClearanceAt(chart.Start(c)));
-                }
-            }
-            else alongClear = ProbedClearance(p, ArrivalSail.NarrowLengths * length);
-            narrowTurn = alongClear < ArrivalSail.NarrowLengths * length;
             // Decision 209 (a): every turn, whatever its angle (ArrivalSail.AnyTurnAngle). Her heading off her way counts as a turn now
             // only off a beat (her chart's beat, decision 193): on a beat she tacks up her way, never turns onto it.
             double angle = ArrivalSail.AnyTurnAngle, headingNow = boat.Root.eulerAngles.y;
@@ -4257,50 +4785,60 @@ namespace ShipwrightAndTransport.Sailing
             {
                 double turn = NavigationMath.Delta(boat.Root.eulerAngles.y, after);
                 double lead = ArrivalSail.TurnLead(turn, MyTurnRadius(), length);
-                if (along <= lead && Math.Abs(turn) >= angle)
+                if (ArrivalSail.TurnStarts(along, length, lead) && Math.Abs(turn) >= angle)
                 {
                     narrowLead = after; narrowLeadAt = Time.time;
-                    if (Time.time >= narrowLeadNoteAt)
+                    if (line == null && Time.time >= narrowLeadNoteAt)
                     {
                         narrowLeadNoteAt = Time.time + 10;
-                        Log.Info("Sailing: " + Name + " starts her turn to " + after.ToString("F0") + " (" + Math.Abs(turn).ToString("F0") + " degrees) " + along.ToString("F0") +
-                            " m before it in narrow water, her lead " + lead.ToString("F0") + " m at " + sog.ToString("F1") + " m/s (decision 196).");
+                        Log.Info("Sailing: " + Name + " starts its turn to " + after.ToString("F0") + " (" + Math.Abs(turn).ToString("F0") + " degrees) " + along.ToString("F0") +
+                            " m before it in narrow water, its lead " + lead.ToString("F0") + " m at " + sog.ToString("F1") + " m/s (decision 196).");
                     }
                 }
             }
             if (double.IsPositiveInfinity(wanted)) return Held(sog);
+            // A turn that fits at the speed the ship has takes no sail in; a cut held for an earlier turn that doesn't fit runs on to its end.
+            double lineAlong = line != null ? line[lineAt].Along : double.NaN;
+            if (NavigationMath.Finite(after) && TurnFits(p, along, after, length))
+            {
+                if (Time.time >= narrowFitNoteAt)
+                {
+                    narrowFitNoteAt = Time.time + 20;
+                    Log.Info("Sailing: " + Name + "'s turn " + along.ToString("F0") + " m ahead to " + after.ToString("F0") + " (" + Math.Abs(NavigationMath.Delta(boat.Root.eulerAngles.y, after)).ToString("F0") +
+                        " degrees) fits its circle (" + MyTurnRadius().ToString("F0") + " m) at " + sog.ToString("F1") + " m/s, " + clear.ToString("F0") + " m of clearance: no sail taken in" +
+                        (narrowHold.Holding(lineAlong, Time.time) && narrowHold.Cut < 1 ? " for it; the cut for an earlier turn is held until the ship is round that turn." : "."));
+                }
+                return Held(sog);
+            }
             // Decision 198 (d): held until she is round it (the turn's end, TurnWindowChords of her length past where it begins).
             double end = along + ArrivalSail.TurnWindowChords * length;
-            bool holding = NavigationMath.Finite(narrowHoldWanted);
-            narrowHoldWanted = holding ? Math.Min(narrowHoldWanted, wanted) : wanted;
-            if (line != null) narrowHoldAlong = Math.Max(holding && NavigationMath.Finite(narrowHoldAlong) ? narrowHoldAlong : 0, line[lineAt].Along + end);
-            else { narrowHoldAlong = double.NaN; narrowHoldUntil = Mathf.Max(holding ? narrowHoldUntil : 0, Time.time + (float)Math.Max(15, end / Math.Max(1, sog))); }
-            narrowShare = (float)(narrowCut = ArrivalSail.NextCut(narrowCut, sog, narrowHoldWanted));
+            narrowShare = (float)narrowHold.Hold(sog, wanted, lineAlong + end, Time.time + Math.Max(15, end / Math.Max(1, sog)));
             if (narrowShare < 1 && Time.time >= narrowNoteAt)
             {
                 narrowNoteAt = Time.time + 20;
-                Log.Info("Sailing: " + Name + " slows for a turn " + along.ToString("F0") + " m ahead in narrow water (decisions 196, 209): " + clear.ToString("F0") + " m of clearance (her length " +
-                    length.ToString("F0") + " m) at " + sog.ToString("F1") + " m/s, wanted " + wanted.ToString("F1") + "; her sail at most " + narrowShare.ToString("P0") + ".");
+                Log.Info("Sailing: " + Name + " slows for a turn " + along.ToString("F0") + " m ahead in narrow water (decisions 196, 209): " + clear.ToString("F0") + " m of clearance (its length " +
+                    length.ToString("F0") + " m) at " + sog.ToString("F1") + " m/s, wanted " + wanted.ToString("F1") + "; its sail at most " + narrowShare.ToString("P0") + ".");
             }
             return narrowShare;
         }
 
-        // Decision 198 (d): her cut held until she is round the turn it was for (on her line by its distance, else for the time the turn
-        // takes), however the turn reads meanwhile (run 20261012-133446: the cut came and went every few seconds and her sails were full
-        // for the last 16 s before Dragon Cliffs' gap). 1 when nothing is held.
-        private double narrowHoldWanted = double.NaN, narrowHoldAlong = double.NaN;
-        private float narrowHoldUntil;
-        private float Held(float sog)
+        // Decision 198 (d): the cut held until the ship is round the turn it was for, however the turn reads meanwhile.
+        private readonly ArrivalSail.NarrowHold narrowHold = new ArrivalSail.NarrowHold();
+        private float narrowFitNoteAt;
+
+        // Whether a turn `along` metres ahead onto `after` fits the ship's circle from where it is: the straight run to where the turn
+        // begins (its lead before it), the arc round the turn, and a hull's length on along `after`, each clear.
+        private bool TurnFits(RoutePoint p, double along, double after, double length)
         {
-            bool holding = NavigationMath.Finite(narrowHoldWanted) &&
-                (line != null && NavigationMath.Finite(narrowHoldAlong) ? line[lineAt].Along < narrowHoldAlong : Time.time < narrowHoldUntil);
-            if (!holding) { narrowHoldWanted = double.NaN; narrowHoldAlong = double.NaN; narrowCut = 1; return 1; }
-            narrowTurn = true;
-            narrowShare = (float)(narrowCut = ArrivalSail.NextCut(narrowCut, sog, narrowHoldWanted));
-            return narrowShare;
+            double heading = boat.Root.eulerAngles.y, turn = NavigationMath.Delta(heading, after), radius = MyTurnRadius();
+            int sign = turn < 0 ? -1 : 1;
+            var start = Ahead(p, heading, (float)ArrivalSail.TurnStart(along, ArrivalSail.TurnLead(turn, radius, length)));
+            if (!water.Clear(p, start) || !TurnArcClear(start, 0f, heading, sign, Math.Abs(turn))) return false;
+            var end = TackNavigator.ArcPoint(start, heading, sign, radius, Math.Abs(turn));
+            return water.Clear(end, Ahead(end, after, (float)length));
         }
-        // Decision 209 (a): the cut held now, stepped each NarrowEvery toward the speed wanted (ArrivalSail.NextCut); 1 when none.
-        private double narrowCut = 1;
+        // The held cut stepped (ArrivalSail.NextCut), or 1 once nothing is held.
+        private float Held(float sog) => narrowShare = (float)narrowHold.Step(sog, line != null ? line[lineAt].Along : double.NaN, Time.time);
 
         // The clearance round `at` without a chart: in 8 directions, the nearest her hull meets something, every half of her radius out
         // to `most`.
@@ -4375,7 +4913,7 @@ namespace ShipwrightAndTransport.Sailing
                 : new[] { recovery.mooringFront, recovery.mooringBack }.Where(t => t).Select(t => t.GetComponent<GPButtonDockMooring>()).Where(d => d && d.spring).ToArray();
 
         internal string Describe() => Custom ? (AtShipyard ? "the shipyard's cleats at " : "the custom berth at ") + Port + " (" + spec.SternCleat + " and " + spec.BowCleat +
-            (Long ? ", and " + spec.ExtraCleat + " beyond her " + (spec.ExtraBeyondBow ? "bow" : "stern") + " for a big ship" : "") + ")" : "the recovery berth at " + Port;
+            (Long ? ", and " + spec.ExtraCleat + " beyond its " + (spec.ExtraBeyondBow ? "bow" : "stern") + " for a big ship" : "") + ")" : "the recovery berth at " + Port;
 
         private static RoutePoint Flat(Vector3 v) => new RoutePoint(v.x, v.z);
     }
@@ -4589,14 +5127,14 @@ namespace ShipwrightAndTransport.Sailing
         {
             var recent = touched.Where(p => p.Key && Time.time - p.Value.Last <= seconds).Select(p => p.Value).OrderByDescending(t => t.Impulse).Take(6).ToArray();
             return recent.Length == 0 ? "nothing in the last " + seconds.ToString("F0") + " s" : string.Join("; ", recent.Select(t => t.What + " at " + t.Point.ToString("F1") +
-                " in her frame (right, up, ahead), normal " + t.Normal.ToString("F2") + ", impulse up to " + t.Impulse.ToString("F0") + " N·s, " + t.Speed.ToString("F2") +
+                " in its frame (right, up, ahead), normal " + t.Normal.ToString("F2") + ", impulse up to " + t.Impulse.ToString("F0") + " N·s, " + t.Speed.ToString("F2") +
                 " m/s, " + t.Count + " frames").ToArray());
         }
     }
 
     internal sealed partial class Voyage
     {
-        private float arrivalSailNoteAt, approachBlockedSince = -1;
+        private float arrivalSailNoteAt, approachBlockedSince = -1, pinnedSince = -1, pinnedFrom, pinnedSeen;
         private const float ApproachBlockedFor = 20;
         // Her half-beam, for where she lies at a custom berth (decision 129): her hull's measured clearance half-width.
         private float HalfBeam => water != null ? water.Radius : Berths.DefaultHalfBeam;
@@ -4691,14 +5229,14 @@ namespace ShipwrightAndTransport.Sailing
                 if (anchor.HasValue) { Job.anchor = anchor.Value; Job.anchorKnown = true; }
             }
             Job.berthKnown = true; ++Job.revision;
-            Log.Info("Sailing: " + Name + ": her arrival at " + Record.to + " is known (decision 203): " + DescribeArrival() +
-                (Job.anchorKnown ? "; first she anchors at (" + At(Job.anchor) + "), " + RoutePoint.Distance(Job.anchor, arrivalSpot).ToString("F0") + " m from the release spot, until her harbour is charted (decision 222)" : "") + ".");
+            Log.Info("Sailing: " + Name + ": its arrival at " + Record.to + " is known (decision 203): " + DescribeArrival() +
+                (Job.anchorKnown ? "; first it anchors at (" + At(Job.anchor) + "), " + RoutePoint.Distance(Job.anchor, arrivalSpot).ToString("F0") + " m from the release spot, until its harbour is charted (decision 222)" : "") + ".");
             return true;
         }
 
-        private string DescribeArrival() => noArrivalSpot ? "its shipyard has no release spot; she goes into storage at her route's end" :
-            towStart == null ? "the shipyard's release spot at (" + At(arrivalSpot) + "), its heading " + arrivalYaw.ToString("F0") + " (she may lie either way round, decision 143)" :
-            "Kicia Bay's tow start, " + towStart.Name + ", at (" + At(ArrivalTarget) + "), her bow " + ArrivalTargetHeading.ToString("F0") + " there; from it the tow takes her to the " +
+        private string DescribeArrival() => noArrivalSpot ? "its shipyard has no release spot; it goes into storage at its route's end" :
+            towStart == null ? "the shipyard's release spot at (" + At(arrivalSpot) + "), its heading " + arrivalYaw.ToString("F0") + " (it may lie either way round, decision 143)" :
+            "Kicia Bay's tow start, " + towStart.Name + ", at (" + At(ArrivalTarget) + "), its bow " + ArrivalTargetHeading.ToString("F0") + " there; from it the tow takes it to the " +
             "shipyard's release spot at (" + At(arrivalSpot) + ")";
 
         private static string At(RoutePoint p) => p.x.ToString("F0") + ", " + p.z.ToString("F0");
@@ -4757,7 +5295,7 @@ namespace ShipwrightAndTransport.Sailing
                 double heading = toTowStart ? ArrivalTargetHeading : ReleaseSpots.LieHeading(arrivalYaw, Job.dockHeading);
                 if (moved > ReleaseSpots.HeldWithin && Job.dockingPhase > 0)
                 {
-                    Log.Info("Sailing: " + Name + "'s arrival lies " + moved.ToString("F0") + " m from where she was coming in to: a fresh approach to " +
+                    Log.Info("Sailing: " + Name + "'s arrival lies " + moved.ToString("F0") + " m from where it was coming in to: a fresh approach to " +
                         DescribeArrival() + " (decision 203).");
                     if (boat.Moorings.AnyRopeMoored()) boat.Moorings.UnmoorAllRopes();
                     Job.dockingPhase = 0; dockStartedAt = dockSettledAt = heldSince = -1; heldHeading = double.NaN;
@@ -4788,13 +5326,14 @@ namespace ShipwrightAndTransport.Sailing
         private bool NavigateDocking(float dt)
         {
             if (dockStartedAt < 0) dockStartedAt = Time.time;
+            if (Job.dockingPhase == 4) { HoldNavigation(dt, 0); TieUpTick(dt); return false; }
             if (Job.dockingPhase == 1 && Time.time - dockStartedAt > 1200) { Hold("Automatic arrival exceeded its approach budget."); dockStartedAt = -1; Job.dockingPhase = 0; return false; }
             if (!ResolveArrivalSpot())
             { HoldNavigation(dt, 0); Status.Message = "Waiting for the destination shipyard to load."; return false; }
             if (noArrivalSpot)
             {
                 // A shipyard without a release spot: she goes into storage from where she is, as when the spot stays taken (D3, D5).
-                if (!berthStayedTaken) { berthStayedTaken = true; Log.Info("Sailing: " + Name + ": " + Record.to + "'s shipyard has no release spot; she goes into storage from where she is."); }
+                if (!berthStayedTaken) { berthStayedTaken = true; Log.Info("Sailing: " + Name + ": " + Record.to + "'s shipyard has no release spot; it goes into storage from where it is."); }
                 Voyages.BerthStayedTaken(this);
                 if (boat == null) return false;
                 HoldNavigation(dt, 0); Status.Message = "No release spot at the destination; storage waits."; return false;
@@ -4815,8 +5354,8 @@ namespace ShipwrightAndTransport.Sailing
                 if (occupiedSince < 0)
                 {
                     occupiedSince = GameClock.Hours;
-                    Log.Info("Sailing: " + Name + ": the release spot at " + Record.to + (towStart != null && Job.dockingPhase < 2 ? " or her tow start" : "") + " is taken by " + occupant.name +
-                        " (its hull in her footprint there, decisions 107, 203); she holds off, for at most " + ReleaseSpots.TakenHours.ToString("0.#") + " h of the game.");
+                    Log.Info("Sailing: " + Name + ": the release spot at " + Record.to + (towStart != null && Job.dockingPhase < 2 ? " or its tow start" : "") + " is taken by " + occupant.name +
+                        " (its hull in its footprint there, decisions 107, 203); it holds off, for at most " + ReleaseSpots.TakenHours.ToString("0.#") + " h of the game.");
                 }
                 if (GameClock.Hours - occupiedSince >= ReleaseSpots.TakenHours)
                 {
@@ -4831,17 +5370,21 @@ namespace ShipwrightAndTransport.Sailing
             var stern = Ahead(Job.destination, Job.dockHeading + 180, Math.Max(0, water.AftExtent - water.Radius));
             var bow = Ahead(Job.destination, Job.dockHeading, Math.Max(0, water.ForeExtent - water.Radius));
             if (!water.ClearHull(stern, bow))
-            { HoldNavigation(dt, 0); Status.Message = "The hull does not have a clear pose at her target (" + water.Obstruction + ")."; return false; }
-            bool atTarget = distance <= 10 && error <= 20 && speed <= .6f && heel.State != HeelState.Urgent && rig.Sails.All(s => s.currentUnroll <= .02f);
+            { HoldNavigation(dt, 0); Status.Message = "The hull does not have a clear pose at its target (" + water.Obstruction + ")."; return false; }
+            // Straight in (StraightInTo): the approach runs along its bearing, and at the spot the draw turns the hull onto the berth, so
+            // its heading there isn't asked.
+            bool straight = StraightNow;
+            double axis = FinalAxis;
+            bool atTarget = distance <= ArrivalSail.HoldReach && (straight || error <= 20) && rig.Sails.All(s => s.currentUnroll <= .02f);
             if (atTarget)
             {
                 if (towStart != null) BeginArrivalTow();
-                else BeginHeld("at the shipyard's release spot after her final approach");
+                else BeginHeld(straight ? "at the shipyard's release spot, come straight in" : "at the shipyard's release spot after its final approach");
                 HoldNavigation(dt, 0); return false;
             }
 
             var here = Point(boat.StablePosition);
-            var forward = Quaternion.Euler(0, Job.dockHeading, 0) * Vector3.forward;
+            var forward = Quaternion.Euler(0, (float)axis, 0) * Vector3.forward;
             float along = Vector3.Dot(Vector(Job.destination) - boat.StablePosition, forward);
             // Overshooting is a failed approach, not permission to move the hull. Replan a fresh approach with the same job.
             if (along < -Math.Max(10, water.Length * .5f) || distance > Math.Max(250, water.Length * 10))
@@ -4849,7 +5392,7 @@ namespace ShipwrightAndTransport.Sailing
                 var wind = Vector3.ProjectOnPlane(Wind.currentWind, Vector3.up);
                 var route = RoutePlanner.Plan(here, NavigationDestination(), water.Clear, NavigationMath.Heading(-wind.x, -wind.z), NoGo, 6000, 8);
                 if (route.Length < 2) { HoldNavigation(dt, 0); Status.Message = "No clear route for another approach."; return false; }
-                ReplaceRoute(route); Job.dockingPhase = 0; navigationClock = 1; dockStartedAt = -1;
+                ReplaceRoute(route); Job.dockingPhase = 0; navigationClock = 1; dockStartedAt = -1; approachAgain = true;
                 return false;
             }
             if (!water.TrafficClear(here, Job.destination))
@@ -4861,22 +5404,43 @@ namespace ShipwrightAndTransport.Sailing
                 if (Time.time - approachBlockedSince >= ApproachBlockedFor)
                 {
                     approachBlockedSince = -1;
-                    var windNow = Vector3.ProjectOnPlane(Wind.currentWind, Vector3.up);
-                    var again = RoutePlanner.Plan(here, NavigationDestination(), water.Clear, NavigationMath.Heading(-windNow.x, -windNow.z), NoGo, 6000, 8);
-                    Log.Info("Sailing: " + Name + "'s final approach stays obstructed (" + water.Obstruction + ", " + distance.ToString("F0") + " m from her target): " +
-                        (again.Length >= 2 ? "a fresh approach." : "no route back out to the approach point; she holds."));
-                    if (again.Length >= 2) { ReplaceRoute(again); Job.dockingPhase = 0; ++Job.revision; navigationClock = 1; dockStartedAt = -1; return false; }
-                    Hold("Final approach obstructed: " + water.Obstruction); return false;
+                    return FreshApproach("stays obstructed (" + water.Obstruction + ")", distance, here);
                 }
                 HoldNavigation(dt, 0); Status.Message = "Final approach obstructed (" + water.Obstruction + "); holding sail demand."; return false;
             }
             approachBlockedSince = -1;
-            // Look along the axis, using native rudder and sail physics to remove cross-track error. No hull pose, velocity or
-            // propulsion writes.
-            steeringTarget = Vector(Job.destination) + forward * Math.Max(20, water.Length);
-            navMessage = "Automatic final approach: " + distance.ToString("F1") + "m, " + speed.ToString("F2") + "m/s";
+            // No way made toward the target (pressed onto something the check along its way doesn't see): a fresh approach. The window
+            // starts again after a pause in these checks or a metre of progress.
+            if (pinnedSince < 0 || Time.time - pinnedSeen > 1 || pinnedFrom - distance >= ArrivalSail.PinnedProgress) { pinnedSince = Time.time; pinnedFrom = distance; }
+            pinnedSeen = Time.time;
+            if (ArrivalSail.Pinned(distance, pinnedFrom, Time.time - pinnedSince))
+            {
+                string made = (pinnedFrom - distance).ToString("F1");
+                pinnedSince = -1;
+                return FreshApproach("makes no way (" + made + " m toward its target in " + ArrivalSail.PinnedSeconds.ToString("F0") + " s)", distance, here);
+            }
+            // Steered at a point on the target's axis ahead of the ship's place along it (ArrivalSail.FinalAim), using native rudder and
+            // sail physics. No hull pose, velocity or propulsion writes.
+            double length = Math.Max(10, water.Length), carry = CarrySpeed(speed);
+            steeringTarget = Vector(ArrivalSail.FinalAim(here, Job.destination, axis, length, LineGuideAhead(length, carry, FullHelmTurnAt(carry))));
+            navMessage = "Automatic final approach" + (straight ? " straight in" : "") + ": " + distance.ToString("F1") + "m, " + speed.ToString("F2") + "m/s";
             Status.Message = navMessage;
             return true;
+        }
+
+        // A fresh approach from where the ship is: its route to the approach point planned again, and the final approach begun again
+        // only once the ship is ApproachAgainLengths of its lengths from the approach point or its line in has run to its end
+        // (approachAgain). No route: a hold.
+        private const float ApproachAgainLengths = 2;
+        private bool approachAgain;
+        private bool FreshApproach(string why, float distance, RoutePoint here)
+        {
+            var windNow = Vector3.ProjectOnPlane(Wind.currentWind, Vector3.up);
+            var again = RoutePlanner.Plan(here, NavigationDestination(), water.Clear, NavigationMath.Heading(-windNow.x, -windNow.z), NoGo, 6000, 8);
+            Log.Info("Sailing: " + Name + "'s final approach " + why + ", " + distance.ToString("F0") + " m from its target: " +
+                (again.Length >= 2 ? "a fresh approach." : "no route back out to the approach point; it holds."));
+            if (again.Length >= 2) { ReplaceRoute(again); Job.dockingPhase = 0; ++Job.revision; navigationClock = 1; dockStartedAt = -1; approachAgain = true; return false; }
+            Hold("Final approach " + why, FaultKind.Close); return false;
         }
 
         // Held at the spot (the user's 1a): the booking's tow draws her bow and stern onto their places there (DrawToSpot), heading
@@ -4891,7 +5455,7 @@ namespace ShipwrightAndTransport.Sailing
             float off = HorizontalDistance(boat.StablePosition, Vector(arrivalSpot)), speed = Vector3.ProjectOnPlane(boat.Body.velocity, Vector3.up).magnitude;
             Job.destination = arrivalSpot; Job.dockHeading = (float)heldHeading; Job.dockingPhase = 2; ++Job.revision;
             heldSince = Time.time; dockSettledAt = -1; towDrawFore = towDrawAft = Unberthing.TowStrengthStart;
-            Log.Info("Sailing: " + Name + " is " + how + ": " + off.ToString("F1") + " m off it at " + speed.ToString("F2") + " m/s; held there by the tow's draw, her bow " +
+            Log.Info("Sailing: " + Name + " is " + how + ": " + off.ToString("F1") + " m off it at " + speed.ToString("F2") + " m/s; held there by the tow's draw, its bow " +
                 heldHeading.ToString("F0") + " (" + WayRound(heldHeading) + "; decision 203).");
         }
 
@@ -4908,11 +5472,11 @@ namespace ShipwrightAndTransport.Sailing
             else if (dockSettledAt < 0) dockSettledAt = Time.time;
             Status.Message = "Held at the shipyard's release spot; settling.";
             if (dockSettledAt >= 0 && Time.time - dockSettledAt >= ReleaseSpots.HeldSettleSeconds)
-                CompleteVoyage("arrived: held at the shipyard's release spot (" + RoutePoint.Distance(p, arrivalSpot).ToString("F1") + " m off it), sails furled, settled for " +
-                    ReleaseSpots.HeldSettleSeconds.ToString("F0") + " s (decision 203).");
+                BeginTieUp("held at the shipyard's release spot (" + RoutePoint.Distance(p, arrivalSpot).ToString("F1") + " m off it), sails furled, settled for " +
+                    ReleaseSpots.HeldSettleSeconds.ToString("F0") + " s (decision 203)");
             else if (Time.time - heldSince >= HeldSettleBudget)
-                CompleteVoyage("arrived: held at the shipyard's release spot " + RoutePoint.Distance(p, arrivalSpot).ToString("F1") + " m off it, " + speed.ToString("F2") +
-                    " m/s, not settled within " + HeldSettleBudget.ToString("F0") + " s; she counts as arrived where she lies (decision 203).");
+                BeginTieUp("held at the shipyard's release spot " + RoutePoint.Distance(p, arrivalSpot).ToString("F1") + " m off it, " + speed.ToString("F2") +
+                    " m/s, not settled within " + HeldSettleBudget.ToString("F0") + " s (decision 203)");
             return false;
         }
 
@@ -4946,15 +5510,20 @@ namespace ShipwrightAndTransport.Sailing
         private void AnchorWhereSheIs(float dt)
         {
             var line = boat.Moorings.GetAnchorController();
-            if (!line || !anchorWinch) { CompleteVoyage("arrived: where the tow in left her, with no anchor winch (decision 203)."); return; }
+            if (!line || !anchorWinch) { CompleteVoyage("arrived: where the tow in left it, with no anchor winch (decision 203)."); return; }
             WinchDrive.Apply(line, anchorWinch, 1, dt);
-            Status.Message = "Letting her anchor go where the tow left her.";
+            Status.Message = "Letting its anchor go where the tow left it.";
             if (boat.Anchor.IsSet() || line.currentLength >= .999f)
             {
                 GameBindings.WinchInput.SetValue(anchorWinch, 0f);
-                CompleteVoyage("arrived: at anchor where the tow in left her, " + HorizontalDistance(boat.StablePosition, Vector(arrivalSpot)).ToString("F0") + " m from the release spot (decision 203).");
+                CompleteVoyage("arrived: at anchor where the tow in left it, " + HorizontalDistance(boat.StablePosition, Vector(arrivalSpot)).ToString("F0") + " m from the release spot (decision 203).");
             }
         }
+
+        // The sail share that keeps the ship answering its helm while it gives way, keeps clear or waits for its chart.
+        internal const float SteerageShare = 0.15f;
+
+        private Crest.BoatProbes waterDrag;
 
         private float DockingSailLimit()
         {
@@ -4964,21 +5533,20 @@ namespace ShipwrightAndTransport.Sailing
             if (Job.dockingPhase == 0)
             {
                 if (!Job.berthKnown || boat?.Body == null) return 1;
-                // A tack needs its speed (decision 161: enough to carry her across the wind): while she waits to tack, tacks or gathers way, all her sail (run
+                // A tack needs its speed (decision 161: enough to carry the ship across the wind): while it waits to tack or tacks, all its sail (run
                 // 20261011-024626: 40-55 m off Fort Aestrin's berth, held to a third of her sail at 1.3 m/s, she never had the speed
                 // to tack, wore into the dock and stalled by the ship for sale).
-                if (navigator != null && (navigator.WaitingToTack || navigator.State == Manoeuvre.Tacking || navigator.Gathering)) return 1;
-                // Decision 222: on her way to her anchor spot she slows into it, not into her berth beyond it.
-                float toBerth = AnchorLegOpen ? HorizontalDistance(boat.StablePosition, Vector(Job.anchor)) : DistanceToTarget();
+                if (navigator != null && (navigator.WaitingToTack || navigator.State == Manoeuvre.Tacking)) return 1;
+                float toBerth = SlowInDistance();
                 float sog = Vector3.ProjectOnPlane(boat.Body.velocity, Vector3.up).magnitude;
                 float cap = (float)ArrivalSail.Limit(toBerth, sog);
                 if (cap < 1 && Time.time >= arrivalSailNoteAt)
                 {
                     arrivalSailNoteAt = Time.time + 30;
-                    Log.Info("Sailing: " + Name + " slows into " + Record.to + ": " + toBerth.ToString("F0") + " m from her target at " + sog.ToString("F1") + " m/s (wanted " +
-                        ArrivalSail.Speed(toBerth).ToString("F1") + "), her sail at most " + cap.ToString("P0") + ".");
+                    Log.Info("Sailing: " + Name + " slows into " + Record.to + ": " + toBerth.ToString("F0") + " m from its target at " + sog.ToString("F1") + " m/s (wanted " +
+                        ArrivalSail.Speed(toBerth).ToString("F1") + "), its sail at most " + cap.ToString("P0") + ".");
                 }
-                return cap;
+                return GatherShare(cap, navigator != null && navigator.Gathering);
             }
             // Held at the spot, or towed in to it: furled.
             if (Job.dockingPhase >= 2) return 0;
@@ -4992,17 +5560,45 @@ namespace ShipwrightAndTransport.Sailing
                 double rate = WinchMath.LengthPerSecond(input, winch.rotationSpeed, winch.gearRatio);
                 reefSeconds = Mathf.Max(reefSeconds, rate > 0 ? (float)(Math.Abs(target - binding.Rope.currentLength) / rate) : 60);
             }
-            float stopping = 10 + speed * reefSeconds + speed * speed / .05f;
+            // Her run to her slowest wanted speed with no sail: the game's forward drag (Crest's BoatProbes, its coefficient set by HullDrag
+            // from her speed: dv/dt = -dragForward x (v^3 + 2v)) times CoastMargin, the most a hull's coast-down ran beyond the law; a
+            // coasting of 0.025 m/s a second where that can't be read.
+            if (!waterDrag) waterDrag = boat.Root.GetComponent<Crest.BoatProbes>();
+            float ahead = Vector3.Dot(boat.Body.velocity, boat.Root.forward);
+            // Lined up: wanted as fast as it can go and still coast down to the hold's speed by the hold's reach, uncapped; its sail in
+            // when faster.
+            if (waterDrag && LinedUp(distance))
+            {
+                double carry = ArrivalSail.CoastSpeed(distance - ArrivalSail.HoldReach, ArrivalSail.HoldSpeed, waterDrag._dragInWaterForward, CoastMargin, reefSeconds);
+                if (NavigationMath.Finite(carry))
+                    return distance <= ArrivalSail.HoldReach || speed > carry ? 0 : (float)FinalShare(distance > 100 ? .2 : .08, ahead, carry);
+            }
+            double coast = waterDrag ? HullTurn.CoastDistance(speed, .35, waterDrag._dragInWaterForward) * CoastMargin : double.NaN;
+            float stopping = 10 + speed * reefSeconds + (float)(coast >= 0 ? coast : speed * speed / .05f);
             float desired = Mathf.Clamp(distance / 100, .35f, 1.2f);
             if (distance <= 10 || speed > desired || distance < stopping && speed > .35f) return 0;
-            return distance > 100 ? .2f : .08f;
+            return (float)FinalShare(distance > 100 ? .2 : .08, ahead, desired);
         }
+
+        // The final approach's sail slower than its wanted speed `desired`: `least` at that speed, given back as the way ahead (`ahead`)
+        // falls, all of it at rest or going astern.
+        internal static double FinalShare(double least, double ahead, double desired) =>
+            least + (1 - least) * (1 - NavigationMath.Clamp(ahead / desired, 0, 1));
+
+        internal const double CoastMargin = 1.2;
+
+        // The slow-in's distance (ArrivalSail): to the berth, or to the anchor spot on the way to it (decision 222).
+        private float SlowInDistance() => AnchorLegOpen ? HorizontalDistance(boat.StablePosition, Vector(Job.anchor)) : DistanceToTarget();
+
+        // The sail share under the slow-in's cap `cap`: gathering way (decision 131), at least SteerageShare.
+        internal static float GatherShare(float cap, bool gathering) => gathering ? Mathf.Max(cap, SteerageShare) : cap;
 
         private void ResetDocking()
         {
             arrivalSpotKnown = noArrivalSpot = false; towStart = null; arrivalTowGivenUp = false;
-            dockScanAt = mooredScanAt = 0; dockStartedAt = dockSettledAt = heldSince = approachBlockedSince = -1; occupiedSince = -1; heldHeading = double.NaN; berthStayedTaken = false;
-            if (Job != null && Job.dockingPhase == 3) towInStage = 0;
+            dockScanAt = mooredScanAt = 0; dockStartedAt = dockSettledAt = heldSince = approachBlockedSince = pinnedSince = -1; occupiedSince = -1; heldHeading = double.NaN; berthStayedTaken = false;
+            approachAgain = false; straightIn = double.NaN; straightInTried = straightInNoted = false; straightInAt = 0; finalLinedUp = false;
+            if (Job != null && (Job.dockingPhase == 3 || Job.dockingPhase == 4)) towInStage = 0;
         }
 
         // ---- Waiting at the origin berth (phase 0) ----
@@ -5045,13 +5641,13 @@ namespace ShipwrightAndTransport.Sailing
             {
                 var line = boat.Moorings.GetAnchorController();
                 if (!waitingAnchorWinch) waitingAnchorWinch = boat.Root.GetComponentsInChildren<GPButtonRopeWinch>(true).FirstOrDefault(w => w.rope == line);
-                if (!line || !waitingAnchorWinch) { MooredAtOrigin = true; Log.Warn("Sailing: " + Name + " can't be moored or anchored at her berth."); return; }
+                if (!line || !waitingAnchorWinch) { MooredAtOrigin = true; Log.Warn("Sailing: " + Name + " can't be moored or anchored at its berth."); return; }
                 WinchDrive.Apply(line, waitingAnchorWinch, 1, dt);
                 if (boat.Anchor.IsSet() || line.currentLength >= .999f)
                 {
                     GameBindings.WinchInput.SetValue(waitingAnchorWinch, 0f);
                     MooredAtOrigin = true;
-                    Log.Info("Sailing: " + Name + " lies at anchor at her berth (no two cleats within her lines' reach).");
+                    Log.Info("Sailing: " + Name + " lies at anchor at its berth (no two cleats within its lines' reach).");
                 }
                 return;
             }
@@ -5060,17 +5656,17 @@ namespace ShipwrightAndTransport.Sailing
             if (boat.Body.isKinematic || !boat.Items.SafeToEnableBoatPhysics() || boat.ObserverDistance > 1000) return;
             var berth = OriginBerth();
             string why = !berth ? "the port has no service berth" : berth.Cleats.Length < 2 ? "the berth has no two cleats"
-                : HorizontalDistance(boat.StablePosition, berth.StablePlace(HalfBeam)) > 15 ? "she isn't at the berth" : null;
+                : HorizontalDistance(boat.StablePosition, berth.StablePlace(HalfBeam)) > 15 ? "it isn't at the berth" : null;
             if (why == null)
             {
                 mooringTries++;
                 try { Berths.MoorAtService(boat.Moorings, berth); SlackenAtTie(boat.Moorings); }
-                catch (Exception e) { why = "her lines can't be laid on its cleats (" + e.Message + ")"; }
+                catch (Exception e) { why = "its lines can't be laid on its cleats (" + e.Message + ")"; }
             }
             if (why == null) return;
             // Her anchor goes down instead (the tries run out at once).
             mooringTries = MooringTries;
-            Log.Info("Sailing: " + Name + ": " + why + "; her anchor goes down.");
+            Log.Info("Sailing: " + Name + ": " + why + "; its anchor goes down.");
         }
     }
 
@@ -5129,12 +5725,12 @@ namespace ShipwrightAndTransport.Sailing
                 double way = towInPath != null ? RouteMath.Length(towInPath) : RoutePoint.Distance(p, towInApproach);
                 towInBudget = Math.Max(TowInBudget, (float)(1.5 * way / TowInSpeed) + TowInAlongsideBudget);
                 Log.Info("Sailing: " + Name + " (stored length " + Record.lengthM.ToString("F1") + " m) is towed from the release spot to " + berth.Describe() + " ("
-                    + RoutePoint.Distance(p, towInBerth).ToString("F0") + " m; the dock on her " + (side >= 0 ? "starboard" : "port") + " side there): "
+                    + RoutePoint.Distance(p, towInBerth).ToString("F0") + " m; the dock on its " + (side >= 0 ? "starboard" : "port") + " side there): "
                     + (towInPath != null ? (towInPath.Length - 1) + " legs, " + way.ToString("F0") + " m" : "no clear way planned, straight to a point off it")
                     + "; " + towInBudget.ToString("F0") + " s at most.");
             }
-            TowInNote(p, "the point off her berth", "drawn alongside", "her berth");
-            if (TowInMove(p, "lies off her berth", "drawn alongside")) EndTowIn(null);
+            TowInNote(p, "the point off its berth", "drawn alongside", "its berth");
+            if (TowInMove(p, "lies off its berth", "drawn alongside")) EndTowIn(null);
         }
 
         // Against a wind the tow's strength rises until she makes its speed (Pull, Unberthing.TowStrength; run 20261007-201058:
@@ -5171,6 +5767,9 @@ namespace ShipwrightAndTransport.Sailing
                 else
                 {
                     towInStage = 2; towDrawFore = towDrawAft = Unberthing.TowStrengthStart;
+                    // Arriving (Kicia Bay's or the backup tow in, the tie at the cleats): drawn the way round she lies now, the place's way or its reverse.
+                    if ((Job.dockingPhase == 3 || Job.dockingPhase == 4) && Math.Abs(NavigationMath.Delta(boat.Root.eulerAngles.y, towInHeading)) > 90)
+                        towInHeading = NavigationMath.Normalize(towInHeading + 180);
                     Log.Info("Sailing: " + Name + " " + reached + " after " + towInSeconds.ToString("F0") + " s; " + drawn + ".");
                 }
                 return false;
@@ -5191,12 +5790,122 @@ namespace ShipwrightAndTransport.Sailing
         private float towInRetryAt;
         private const float TowInRetrySeconds = 10;
 
-        private void BeginArrivalTow()
+        // Held at the release spot (docking phase 2), the booking's tow takes her to the destination's service berth (the shipyard's cleats,
+        // decision 217; Chronos its pier) and she is tied there as at her departure (docking phase 4); her storage's half hour counts from
+        // then. Where the berth is taken, has no two cleats or the tow fails, she is held at the release spot as before (tieUpGivenUp).
+        private bool tieUpGivenUp;
+        private int tieUpTries;
+        private float tieUpScanAt;
+        private const int TieUpTries = 3;
+        private ServiceBerth destinationBerth;
+        private float destinationBerthAt = float.NegativeInfinity;
+        private ServiceBerth DestinationBerth()
+        {
+            if (Time.time >= destinationBerthAt || destinationBerth != null && !destinationBerth.Valid)
+            { destinationBerth = Berths.Service(Record.to, Record.lengthM); destinationBerthAt = Time.time + OriginBerthSeconds; }
+            return destinationBerth;
+        }
+
+        private void BeginTieUp(string held)
+        {
+            var berth = DestinationBerth();
+            PurchasableBoat at = null;
+            string why = tieUpGivenUp ? "its tow to the berth was given up" : !berth ? "the port has no service berth" : berth.Cleats.Length < 2 ? "its berth has no two cleats"
+                : Voyages.WaitsAtBerth(Record.to) ? "a booked ship waits at its berth" : null;
+            if (why == null && water != null)
+            {
+                at = Berths.Occupant(FloatingOriginManager.instance.RealPosToShiftingPos(berth.StablePlace(HalfBeam)), berth.Heading, new Berths.Footprint(water), boat.Root);
+                if (at) why = "its berth is taken by " + at.name;
+            }
+            if (why != null) { CompleteVoyage("arrived: " + held + "; held there, not tied at the berth (" + why + ")."); return; }
+            Log.Info("Sailing: " + Name + " is " + held + "; the tow takes it to " + berth.Describe() + ", " + HorizontalDistance(boat.StablePosition, berth.StablePlace(HalfBeam)).ToString("F0") +
+                " m off, to be tied there.");
+            Job.dockingPhase = 4; ++Job.revision;
+            towInStage = 0; towInSeconds = 0; towInNoteAt = 0; towInBudget = TowInBudget; tieUpTries = 0; tieUpScanAt = 0;
+        }
+
+        private void TieUpTick(float dt)
+        {
+            if (boat.Body.isKinematic || !boat.Items.SafeToEnableBoatPhysics() || boat.ObserverDistance > 1000) return;
+            var berth = DestinationBerth();
+            if (!berth) { EndTieUp("its berth isn't in the game"); return; }
+            if (water == null) water = new NavigationWater(boat, IsOwnVesselCollider);
+            if (!arrivalSpotKnown)
+            {
+                if (Time.time < mooredScanAt) return;
+                mooredScanAt = Time.time + 1; arrivalSpotKnown = ReadArrivalSpot() && !noArrivalSpot;
+                if (!arrivalSpotKnown) return;
+            }
+            var p = Point(boat.StablePosition);
+            if (towInStage == 0)
+            {
+                // Alongside the way round she lies (decision 143's at the release spot): the berth's heading or its reverse, the nearer.
+                towInBerth = Point(berth.StablePlace(HalfBeam));
+                towInHeading = Math.Abs(NavigationMath.Delta(boat.Root.eulerAngles.y, berth.Heading)) <= 90 ? berth.Heading : NavigationMath.Normalize(berth.Heading + 180);
+                var cleats = berth.Cleats.Select(c => Point(FloatingOriginManager.instance.ShiftingPosToRealPos(c.transform.position))).ToArray();
+                int side = Unberthing.DockSide(towInHeading, towInBerth, cleats);
+                // At the shipyard's cleats along the release spot's line to abreast of the berth, then drawn across; at a pier, a point off
+                // its open side.
+                if (berth.AtShipyard)
+                {
+                    double r = arrivalYaw * Math.PI / 180;
+                    towInApproach = Ahead(arrivalSpot, arrivalYaw, (towInBerth.x - arrivalSpot.x) * Math.Sin(r) + (towInBerth.z - arrivalSpot.z) * Math.Cos(r));
+                }
+                else towInApproach = Ahead(towInBerth, towInHeading + (side >= 0 ? -90 : 90), water.Radius * 2 + 3);
+                towInPath = PlanTowIn(p, towInApproach); towInLeg = 0; towInStage = 1; towInSeconds = 0; towInNoteAt = 0; ResetTowStrength(); WatchTowContacts();
+                ChooseTowEnd(p, towInPath, towInApproach);
+                double way = towInPath != null ? RouteMath.Length(towInPath) : RoutePoint.Distance(p, towInApproach);
+                towInBudget = Math.Max(TowInBudget, (float)(1.5 * way / TowInSpeed) + TowInAlongsideBudget);
+                Log.Info("Sailing: " + Name + " is towed from the release spot to " + berth.Describe() + " (" + RoutePoint.Distance(p, towInBerth).ToString("F0") + " m; the dock on its " +
+                    (side >= 0 ? "starboard" : "port") + " side there): " + (towInPath != null ? (towInPath.Length - 1) + " legs, " + way.ToString("F0") + " m" : "no clear way planned, straight to a point off it") +
+                    (towSternLeads ? ", its stern leading (its way lies astern)" : "") + "; " + towInBudget.ToString("F0") + " s at most.");
+            }
+            if ((towInSeconds += dt) > towInBudget) { EndTieUp("the tow's " + towInBudget.ToString("F0") + " s are out"); return; }
+            if (towInStage < 3)
+            {
+                TowInNote(p, "the point off its berth", "drawn alongside", "its berth");
+                if (!TowInMove(p, "lies off its berth", "drawn alongside")) return;
+                EndTowContacts();
+                towInStage = 3; tieUpScanAt = 0;
+            }
+            // As at her departure: the line nearest each cleat laid on it, two lines or more.
+            int lines = boat.Moorings.ropes.Count(r => r && r.IsMoored());
+            if (lines >= 2)
+            {
+                CompleteVoyage("arrived: towed from the release spot and tied at " + berth.Describe() + " with " + lines + " lines, after " + towInSeconds.ToString("F0") + " s.");
+                return;
+            }
+            if (Time.time < tieUpScanAt) return;
+            tieUpScanAt = Time.time + 2;
+            if (tieUpTries++ >= TieUpTries) { EndTieUp("only " + lines + " of its lines took the cleats"); return; }
+            try { Berths.MoorAtService(boat.Moorings, berth); SlackenAtTie(boat.Moorings); }
+            catch (Exception e) { EndTieUp("its lines can't be laid on the cleats (" + e.Message + ")"); }
+        }
+
+        // The tow to the berth given up: her lines let go, and she goes back to be held at the release spot (docking phase 2).
+        private void EndTieUp(string why)
+        {
+            EndTowContacts();
+            if (boat.Moorings.AnyRopeMoored()) boat.Moorings.UnmoorAllRopes();
+            Log.Info("Sailing: " + Name + ": the tow to its berth ends: " + why + "; " + StuckReport() + "; it is held at the release spot instead (decision 203).");
+            tieUpGivenUp = true; towInStage = 0;
+            Job.dockingPhase = 2; ++Job.revision; heldSince = -1; dockSettledAt = -1;
+        }
+
+        // `why`: begun where she lies for want of a way in she can sail (ArrivalNoWayHolds), not at Kicia Bay's tow start.
+        private int arrivalNoWay;
+        internal const int ArrivalNoWayHolds = 1;
+        internal const double ArrivalNoGainSeconds = 300;
+        private void BeginArrivalTow(string why = null)
         {
             double lie = ReleaseSpots.LieHeading(arrivalYaw, boat.Root.eulerAngles.y);
-            Log.Info("Sailing: " + Name + " lies at Kicia Bay's tow start (" + (towStart != null ? towStart.Name : "?") + ", " + DistanceToTarget().ToString("F1") + " m off it, her bow " +
-                boat.Root.eulerAngles.y.ToString("F0") + "): the tow takes her in through its channel to the shipyard's release spot, " +
-                HorizontalDistance(boat.StablePosition, Vector(arrivalSpot)).ToString("F0") + " m off (decision 203).");
+            if (why != null)
+                Log.Info("Sailing: " + Name + ": " + why + "; the tow takes it in to the shipyard's release spot, " +
+                    HorizontalDistance(boat.StablePosition, Vector(arrivalSpot)).ToString("F0") + " m off, its bow " + boat.Root.eulerAngles.y.ToString("F0") + ".");
+            else
+                Log.Info("Sailing: " + Name + " lies at Kicia Bay's tow start (" + (towStart != null ? towStart.Name : "?") + ", " + DistanceToTarget().ToString("F1") + " m off it, its bow " +
+                    boat.Root.eulerAngles.y.ToString("F0") + "): the tow takes it in through its channel to the shipyard's release spot, " +
+                    HorizontalDistance(boat.StablePosition, Vector(arrivalSpot)).ToString("F0") + " m off (decision 203).");
             Job.destination = arrivalSpot; Job.dockHeading = (float)lie; Job.dockingPhase = 3; ++Job.revision;
             towInStage = 0; towInSeconds = 0; towInNoteAt = 0; towInBudget = TowInBudget; arrivalTowGivenUp = false; towInRetryAt = 0; occupiedSince = -1;
         }
@@ -5220,12 +5929,12 @@ namespace ShipwrightAndTransport.Sailing
                     if (occupiedSince < 0)
                     {
                         occupiedSince = GameClock.Hours;
-                        Log.Info("Sailing: " + Name + ": no way for the tow in to the release spot (" + water.Obstruction + "); she waits at her tow start, for at most " +
+                        Log.Info("Sailing: " + Name + ": no way for the tow in to the release spot (" + water.Obstruction + "); it waits at its tow start, for at most " +
                             ReleaseSpots.TakenHours.ToString("0.#") + " h of the game (decision 203).");
                     }
                     if (GameClock.Hours - occupiedSince >= ReleaseSpots.TakenHours)
                     {
-                        if (!berthStayedTaken) { berthStayedTaken = true; Log.Info("Sailing: " + Name + ": still no way for the tow after " + ReleaseSpots.TakenHours.ToString("0.#") + " h: storage from where she lies (D3)."); }
+                        if (!berthStayedTaken) { berthStayedTaken = true; Log.Info("Sailing: " + Name + ": still no way for the tow after " + ReleaseSpots.TakenHours.ToString("0.#") + " h: storage from where it lies (D3)."); }
                         Voyages.BerthStayedTaken(this);
                     }
                     return;
@@ -5233,12 +5942,12 @@ namespace ShipwrightAndTransport.Sailing
                 occupiedSince = -1;
                 // Decision 225 (9): its time counted afresh with its stage, as its budget is set for the way left (after a save her sailor
                 // comes back at stage 0 with the time used before kept, and the tow gave up early).
-                towInLeg = 0; towInStage = 1; towInSeconds = 0; towInNoteAt = 0; ResetTowStrength(); WatchTowContacts();
+                towInLeg = 0; towInStage = 1; towInSeconds = 0; towInNoteAt = 0; ResetTowStrength(); WatchTowContacts(); ChooseTowEnd(p, towInPath, towInApproach);
                 double way = towInPath != null ? RouteMath.Length(towInPath) : RoutePoint.Distance(p, towInApproach);
                 towInBudget = Math.Max(TowInBudget, (float)(1.5 * way / TowInSpeed) + TowInAlongsideBudget);
-                Log.Info("Sailing: " + Name + " is towed in to the release spot at " + Record.to + " (" + RoutePoint.Distance(p, towInBerth).ToString("F0") + " m, to lie with her bow " +
+                Log.Info("Sailing: " + Name + " is towed in to the release spot at " + Record.to + " (" + RoutePoint.Distance(p, towInBerth).ToString("F0") + " m, to lie with its bow " +
                     towInHeading.ToString("F0") + "): " + (towInPath != null ? (towInPath.Length - 1) + " legs, " + way.ToString("F0") + " m (" + towInWay + ")" : "no clear way planned, straight to it") +
-                    "; " + towInBudget.ToString("F0") + " s at most (decision 203).");
+                    (towSternLeads ? ", its stern leading (its way lies astern)" : "") + "; " + towInBudget.ToString("F0") + " s at most (decision 203).");
             }
             TowInNote(p, "the release spot", "drawn onto the release spot", "it");
             if (TowInMove(p, "lies by the release spot", "drawn onto it")) EndArrivalTow(null);
@@ -5254,7 +5963,7 @@ namespace ShipwrightAndTransport.Sailing
                 return;
             }
             Log.Info("Sailing: " + Name + ": the tow in to the release spot ends: " + why + "; " + StuckReport() + "; " + TowContactReport() +
-                "; her anchor goes down where she is, and she counts as arrived there (decision 203).");
+                "; its anchor goes down where it is, and it counts as arrived there (decision 203).");
             EndTowContacts();
             arrivalTowGivenUp = true;
         }
@@ -5292,7 +6001,7 @@ namespace ShipwrightAndTransport.Sailing
             if ((towInSeconds += dt) > towInBudget)
             {
                 Log.Info("Sailing: " + Name + ": the tow out's " + towInBudget.ToString("F0") + " s are out (" + StuckReport() + "; " + TowContactReport() +
-                    "); it is planned again from where she lies (decision 220).");
+                    "); it is planned again from where it lies (decision 220).");
                 EndTowContacts(); towInStage = 0; towInSeconds = 0; towInBudget = TowInBudget;
             }
             var p = Point(boat.StablePosition);
@@ -5311,7 +6020,7 @@ namespace ShipwrightAndTransport.Sailing
                     if (!towOutWaitNoted)
                     {
                         towOutWaitNoted = true;
-                        Log.Info("Sailing: " + Name + ": no way for the tow out to Kicia Bay's tow start (" + water.Obstruction + "); she waits where she lies, planned again every " +
+                        Log.Info("Sailing: " + Name + ": no way for the tow out to Kicia Bay's tow start (" + water.Obstruction + "); it waits where it lies, planned again every " +
                             TowInRetrySeconds.ToString("F0") + " s (decision 220).");
                     }
                     return;
@@ -5326,7 +6035,7 @@ namespace ShipwrightAndTransport.Sailing
             }
             Status.Message = "Towed out of the channel: " + RoutePoint.Distance(p, towInApproach).ToString("F0") + " m to the tow start.";
             TowInNote(p, "the tow start", "let go", "it");
-            TowInMove(p, "reached Kicia Bay's tow start", "the tow lets her go");
+            TowInMove(p, "reached Kicia Bay's tow start", "the tow lets it go");
             if (towInStage == 2) EndTowOut();
         }
 
@@ -5334,7 +6043,7 @@ namespace ShipwrightAndTransport.Sailing
         {
             towInStage = 0; Job.towedOut = true; ++Job.revision;
             EndTowContacts();
-            Log.Info("Sailing: " + Name + " lies at Kicia Bay's tow start after " + towInSeconds.ToString("F0") + " s of the tow out; her sailor sets sail (decision 220). " + StuckReport());
+            Log.Info("Sailing: " + Name + " lies at Kicia Bay's tow start after " + towInSeconds.ToString("F0") + " s of the tow out; its sailor sets sail (decision 220). " + StuckReport());
             FinishUnberthing(true);
         }
 
@@ -5385,7 +6094,7 @@ namespace ShipwrightAndTransport.Sailing
             var ways = new System.Collections.Generic.List<KeyValuePair<string, Func<RoutePoint, RoutePoint, bool>>>();
             if (seabed) ways.Add(new KeyValuePair<string, Func<RoutePoint, RoutePoint, bool>>("wide, the seabed checked", Wide(TowWideSeabed)));
             ways.Add(new KeyValuePair<string, Func<RoutePoint, RoutePoint, bool>>("wide", Wide(TowWideHull)));
-            ways.Add(new KeyValuePair<string, Func<RoutePoint, RoutePoint, bool>>("her own clearance", water.ClearHull));
+            ways.Add(new KeyValuePair<string, Func<RoutePoint, RoutePoint, bool>>("its own clearance", water.ClearHull));
             // The arrival's tow plans on an 8 m grid (as her approach does under 600 m): Kicia Bay's channel is 14-17 m from dock to dock,
             // which the 20 m grid's points and legs never fit, and with no way planned the tow pulls her straight at the spot, across the
             // land between. The booking's tow keeps its own (the user, 2026-10-12: its route stays as it is).
@@ -5404,7 +6113,7 @@ namespace ShipwrightAndTransport.Sailing
         private void EndTowIn(string why)
         {
             Job.toBerth = false; ++Job.revision; towInStage = 0; towStuck = 0;
-            Log.Info("Sailing: " + Name + (why == null ? " lies at her berth after the tow (" + towInSeconds.ToString("F0") + " s)." : ": the tow in ends: " + why + "; " + StuckReport() + "; " + TowContactReport() + "."));
+            Log.Info("Sailing: " + Name + (why == null ? " lies at its berth after the tow (" + towInSeconds.ToString("F0") + " s)." : ": the tow in ends: " + why + "; " + StuckReport() + "; " + TowContactReport() + "."));
             EndTowContacts();
         }
 
@@ -5422,7 +6131,7 @@ namespace ShipwrightAndTransport.Sailing
 
         private string TowForceReport()
         {
-            string report = towForceMax <= 0 ? "no tow" : "the tow's pull up to " + towForceMax.ToString("F0") + " N, across her up to " + towForceAcross.ToString("F0") + " N (+ to starboard)";
+            string report = towForceMax <= 0 ? "no tow" : "the tow's pull up to " + towForceMax.ToString("F0") + " N, across it up to " + towForceAcross.ToString("F0") + " N (+ to starboard)";
             towForceMax = towForceAcross = 0;
             return report;
         }
@@ -5466,6 +6175,16 @@ namespace ShipwrightAndTransport.Sailing
         private LinePlanner wayInPlanner;
         private bool wayInChecked;
         private int wayInClosed;
+        // The ship's own line in begins ArrivalSetUp metres along the chart's way before the way's first water too narrow to tack in,
+        // where that lies further out than ArrivalLineFrom by water, so the turn into the narrow water is planned in open water.
+        // wayInFrom: that point's distance by water. The way-in check keeps ArrivalLineFrom: from open water a search that can't
+        // succeed runs to MostStates, and a closing where it stopped would be wrong.
+        internal const double ArrivalSetUp = 300;
+        private double wayInFrom;
+
+        // Where the line in begins, down the chart's way from `from`, for a hull `length` long.
+        internal static RoutePoint? WayInEntry(WaterField chart, RoutePoint from, double length, out double heading) =>
+            chart.EntryDown(from, ArrivalLineFrom, out heading, ArrivalSetUp, Math.Max(ChartNarrowLengths * length, ChartNarrowLeast) / 2);
 
         // Decision 201 (b): her chart's way in closed where her search got stuck: from the state it reached nearest her approach point by
         // water, one to ChartFailLengths of her lengths down her way, each cell within her length (decision 195 b's closing), none within
@@ -5495,10 +6214,10 @@ namespace ShipwrightAndTransport.Sailing
             chartArriving = true; chart = null; chartDone = chartLeft = chartNone = false; inArrivalChart = arrivalReckoned = false;
             line = null; linePlanner = null; lineReplanWhy = null; refloodWhy = null; lineRetryAt = 0; lineAt = 0;
             tideWait = tideRisen = tideGaveUp = false; tideWaitSince = -1; tideNeed = double.NaN;
-            narrowHoldWanted = double.NaN; narrowHoldAlong = double.NaN;
-            wayInPlanner = null; wayInChecked = false; wayInClosed = 0;
-            Log.Info("Sailing: " + Name + " is " + DistanceToTarget().ToString("F0") + " m from her berth at " + Record.to + ": she charts her destination's harbour, her way in to be planned " +
-                "with her turning circle to her approach point (decisions 198 h, 201 g" + (AnchorLegOpen ? ", 222: " + (Job.anchorStage == 1 ? "at anchor" : "on her way in") + ", the island " + ChartIslandDrop().ToString("F2") +
+            narrowHold.Clear();
+            wayInPlanner = null; wayInChecked = false; wayInClosed = 0; wayInFrom = 0;
+            Log.Info("Sailing: " + Name + " is " + DistanceToTarget().ToString("F0") + " m from its berth at " + Record.to + ": it charts its destination's harbour, its way in to be planned " +
+                "with its turning circle to its approach point (decisions 198 h, 201 g" + (AnchorLegOpen ? ", 222: " + (Job.anchorStage == 1 ? "at anchor" : "on its way in") + ", the island " + ChartIslandDrop().ToString("F2") +
                 " m below its height now" : "") + ").");
         }
 
@@ -5526,27 +6245,27 @@ namespace ShipwrightAndTransport.Sailing
             if (Job.anchorStage == 0)
             {
                 Job.anchorStage = 1; ++Job.revision; anchorWeighSeconds = 0;
-                Log.Info("Sailing: " + Name + " " + (canAnchor ? "lets go her anchor" : "stops, with no anchor winch,") + " at her anchor spot off " + Record.to + " (" +
-                    RoutePoint.Distance(Point(boat.StablePosition), Job.anchor).ToString("F0") + " m off it) and waits there until her harbour is charted (decision 222).");
+                Log.Info("Sailing: " + Name + " " + (canAnchor ? "lets go its anchor" : "stops, with no anchor winch,") + " at its anchor spot off " + Record.to + " (" +
+                    RoutePoint.Distance(Point(boat.StablePosition), Job.anchor).ToString("F0") + " m off it) and waits there until its harbour is charted (decision 222).");
             }
             if (!(chartArriving && (chartDone || chartNone)))
             {
                 if (canAnchor && !boat.Anchor.IsSet() && rope.currentLength < .999f) WinchDrive.Apply(rope, anchorWinch, 1, dt);
                 else if (canAnchor) GameBindings.WinchInput.SetValue(anchorWinch, 0f);
-                Status.Message = "At anchor off " + Record.to + ": " + (!ChartSeabedOn(BerthIsland()) ? "waiting until the player is near enough to chart her harbour." : chartArriving ? "charting her harbour." : "waiting for its island to load.");
+                Status.Message = "At anchor off " + Record.to + ": " + (!ChartSeabedOn(BerthIsland()) ? "waiting until the player is near enough to chart its harbour." : chartArriving ? "charting its harbour." : "waiting for its island to load.");
                 return false;
             }
             if (canAnchor && (rope.currentLength > 0.005f || boat.Anchor.IsSet()))
             {
-                if ((anchorWeighSeconds += dt) > AnchorWeighSeconds) { Hold("Anchor could not be recovered at her anchor spot."); return false; }
+                if ((anchorWeighSeconds += dt) > AnchorWeighSeconds) { Hold("Anchor could not be recovered at its anchor spot."); return false; }
                 WinchDrive.Apply(rope, anchorWinch, 0, dt);
                 Status.Message = "Weighing anchor off " + Record.to + " (" + rope.currentLength.ToString("P0") + ").";
                 return false;
             }
             if (canAnchor) GameBindings.WinchInput.SetValue(anchorWinch, 0f);
             Job.anchorStage = 2; ++Job.revision; approachPlanAt = 0;
-            sails.Plan((float)heel.Deployment, false);
-            Log.Info("Sailing: " + Name + " weighs anchor off " + Record.to + ": her harbour is charted" + (chartNone ? " (no chart there)" : "") + "; she sails in (decision 222).");
+            sails.Plan((float)heel.Deployment);
+            Log.Info("Sailing: " + Name + " weighs anchor off " + Record.to + ": its harbour is charted" + (chartNone ? " (no chart there)" : "") + "; it sails in (decision 222).");
             return false;
         }
 
@@ -5555,8 +6274,8 @@ namespace ShipwrightAndTransport.Sailing
         private void SkipAnchor()
         {
             Job.anchorStage = 2; ++Job.revision; approachPlanAt = 0;
-            Log.Info("Sailing: " + Name + "'s harbour at " + Record.to + " is charted on her way in" + (chartNone ? " (no chart there)" : "") + ", " +
-                RoutePoint.Distance(Point(boat.StablePosition), Job.anchor).ToString("F0") + " m before her anchor spot: she goes straight in, without anchoring (decision 222).");
+            Log.Info("Sailing: " + Name + "'s harbour at " + Record.to + " is charted on its way in" + (chartNone ? " (no chart there)" : "") + ", " +
+                RoutePoint.Distance(Point(boat.StablePosition), Job.anchor).ToString("F0") + " m before its anchor spot: it goes straight in, without anchoring (decision 222).");
         }
 
         // The island whose load distance holds this point (real metres), as EnsureVoyageScenes keeps it, or null.
@@ -5589,7 +6308,7 @@ namespace ShipwrightAndTransport.Sailing
         private bool BerthIslandLoaded()
         {
             var island = BerthIsland();
-            return island && SceneManager.GetSceneByBuildIndex(island.islandIndex).isLoaded;
+            return island && IslandScenes.Loaded(island);
         }
 
         // How far her chart's island stands below its true height now (+ low; IslandHeight.Drop), 0 where unknown.
@@ -5618,11 +6337,17 @@ namespace ShipwrightAndTransport.Sailing
                 int edge = fromHer ? -1 : chart.EdgeNearest(p);
                 RoutePoint? entry = null;
                 double heading = double.NaN;
-                if (fromHer || edge >= 0) entry = chart.EntryDown(fromHer ? p : chart.Centre(edge), ArrivalLineFrom, out heading);
+                if (fromHer || edge >= 0)
+                {
+                    var from = fromHer ? p : chart.Centre(edge);
+                    entry = chart.EntryDown(from, ArrivalLineFrom, out heading);
+                    var setUp = WayInEntry(chart, from, length, out _);
+                    wayInFrom = setUp.HasValue ? chart.DistanceFrom(setUp.Value) : 0;
+                }
                 if (!entry.HasValue)
                 {
-                    wayInChecked = true;
-                    Log.Info("Sailing: " + Name + "'s way in can't be checked (decision 201 b): her chart's flood reaches " + (fromHer ? "no way down from her" : "no water on its edge") + ".");
+                    wayInChecked = true; wayInFrom = 0;
+                    Log.Info("Sailing: " + Name + "'s way in can't be checked (decision 201 b): its chart's flood reaches " + (fromHer ? "no way down from it" : "no water on its edge") + ".");
                     return;
                 }
                 if (!NavigationMath.Finite(heading)) heading = Job.dockHeading;
@@ -5631,10 +6356,10 @@ namespace ShipwrightAndTransport.Sailing
                 double windNow = wind.sqrMagnitude > 0.01f ? WindFrom() : double.NaN;
                 var goal = new LineGoal(chart.FloodGoal, Job.dockHeading, Math.Max(ArrivalGoalLeast, length / 2), ArrivalGoalTolerance);
                 wayInPlanner = new LinePlanner(chart, entry.Value, heading, length, Math.Max(0.5, water.Radius), c.Plan(true, length, HullWithoutBowsprit), c.Plan(false, length, HullWithoutBowsprit),
-                    windNow, NavigationMath.Finite(windNow) ? chartBeat : double.NaN, goal);
-                Log.Info("Sailing: " + Name + " checks her way in (decision 201 b): her line in searched from (" + entry.Value.x.ToString("F0") + ", " + entry.Value.z.ToString("F0") + "), " +
-                    chart.DistanceFrom(entry.Value).ToString("F0") + " m by water from her approach point, heading " + heading.ToString("F0") + ", down her chart's way from " +
-                    (fromHer ? "her" : "the water on its edge nearest her") + ".");
+                    windNow, NavigationMath.Finite(windNow) ? chartBeat : double.NaN, goal, chartWears);
+                Log.Info("Sailing: " + Name + " checks its way in (decision 201 b): its line in searched from (" + entry.Value.x.ToString("F0") + ", " + entry.Value.z.ToString("F0") + "), " +
+                    chart.DistanceFrom(entry.Value).ToString("F0") + " m by water from its approach point, heading " + heading.ToString("F0") + ", down its chart's way from " +
+                    (fromHer ? "it" : "the water on its edge nearest it") + ".");
                 return;
             }
             if (!wayInPlanner.Step(LineBudgetMs)) return;
@@ -5642,8 +6367,8 @@ namespace ShipwrightAndTransport.Sailing
             if (!done.Failed)
             {
                 wayInChecked = true;
-                Log.Info("Sailing: " + Name + "'s way in is one her circle makes (decision 201 b): a line from her entry " + done.Line[done.Line.Count - 1].Along.ToString("F0") +
-                    " m to her approach point (" + done.States + " states, " + done.Milliseconds.ToString("F0") + " ms over the frames).");
+                Log.Info("Sailing: " + Name + "'s way in is one its circle makes (decision 201 b): a line from its entry " + done.Line[done.Line.Count - 1].Along.ToString("F0") +
+                    " m to its approach point (" + done.States + " states, " + done.Milliseconds.ToString("F0") + " ms over the frames).");
                 return;
             }
             var stuck = done.Stuck();
@@ -5651,16 +6376,16 @@ namespace ShipwrightAndTransport.Sailing
             if (closed == 0)
             {
                 wayInChecked = true;
-                Log.Info("Sailing: " + Name + " finds no line in from her entry (decision 201 b: " + done.Why + ", " + done.Milliseconds.ToString("F0") + " ms over the frames); " +
-                    (wayInClosed >= WayInCloses ? "her way already closed " + WayInCloses + " times" : stuck.HasValue ? "nothing left to close where it got stuck" : "it reached nowhere") +
-                    ": her chart's guide as before (decision 157).");
+                Log.Info("Sailing: " + Name + " finds no line in from its entry (decision 201 b: " + done.Why + ", " + done.Milliseconds.ToString("F0") + " ms over the frames); " +
+                    (wayInClosed >= WayInCloses ? "its way already closed " + WayInCloses + " times" : stuck.HasValue ? "nothing left to close where it got stuck" : "it reached nowhere") +
+                    ": its chart's guide as before (decision 157).");
                 return;
             }
             wayInClosed++;
             FloodChart();
-            refloodWhy = "decision 201 b: no line in from her entry (" + done.Why + "), " + closed + " cells of her way closed where her search got stuck, at (" +
+            refloodWhy = "decision 201 b: no line in from its entry (" + done.Why + "), " + closed + " cells of its way closed where its search got stuck, at (" +
                 stuck.Value.x.ToString("F0") + ", " + stuck.Value.z.ToString("F0") + "), " + wayInClosed + " of " + WayInCloses;
-            Log.Info("Sailing: " + Name + "'s way in is reckoned again (" + refloodWhy + "); her chart flooded again a slice a frame (decision 198 j).");
+            Log.Info("Sailing: " + Name + "'s way in is reckoned again (" + refloodWhy + "); its chart flooded again a slice a frame (decision 198 j).");
         }
 
         // Decision 201 (g): within RouteHarbour of her berth before her destination is charted (her chart probed and flooded), her sail
@@ -5672,11 +6397,11 @@ namespace ShipwrightAndTransport.Sailing
             if (!arrivalLateLogged)
             {
                 arrivalLateLogged = true;
-                Log.Info("Sailing: " + Name + " is " + DistanceToTarget().ToString("F0") + " m from her berth, her destination not charted yet (" +
+                Log.Info("Sailing: " + Name + " is " + DistanceToTarget().ToString("F0") + " m from its berth, its destination not charted yet (" +
                     (chart == null ? "not begun" : chartNext < chart.Count ? (100.0 * chartNext / chart.Count).ToString("F0") + "% of its cells" : "its flood") +
-                    "): her sail at steerage until it is (decision 201 g).");
+                    "): its sail at steerage until it is (decision 201 g).");
             }
-            return (float)EmergencySailPolicy.SteerageDeployment;
+            return SteerageShare;
         }
 
         // Whether she is in her destination's chart's water (her way in reaches her); the first time it doesn't though she is in the
@@ -5690,12 +6415,12 @@ namespace ShipwrightAndTransport.Sailing
             if (inside && !reached && !arrivalReckoned && !tideGaveUp && chart.Depth.Known && !chart.Flooding)
             {
                 arrivalReckoned = true;
-                WayClosed(p, "she is in her destination's chart, its way in not reaching her");
+                WayClosed(p, "it is in its destination's chart, its way in not reaching it");
                 return inArrivalChart = false;
             }
             if (reached && !inArrivalChart)
-                Log.Info("Sailing: " + Name + " is in her destination's chart's water: " + chart.DistanceFrom(p).ToString("F0") + " m by water to her approach point, " +
-                    RoutePoint.Distance(p, Job.destination).ToString("F0") + " m from her berth (decision 198 h).");
+                Log.Info("Sailing: " + Name + " is in its destination's chart's water: " + chart.DistanceFrom(p).ToString("F0") + " m by water to its approach point, " +
+                    RoutePoint.Distance(p, Job.destination).ToString("F0") + " m from its berth (decision 198 h).");
             return inArrivalChart = reached;
         }
 
@@ -5708,14 +6433,21 @@ namespace ShipwrightAndTransport.Sailing
             if (moved < ArrivalRetargetMetres) return;
             chartGoal = now;
             FloodChart();
-            refloodWhy = "decision 198 h: her approach point moved " + moved.ToString("F0") + " m (" + WayRound(Job.dockHeading) + ")";
-            ReplanLine("her approach point moved (decision 198 h)");
-            Log.Info("Sailing: " + Name + "'s way in is reckoned again from her approach point (" + refloodWhy + "), a slice a frame (decision 198 j).");
+            refloodWhy = "decision 198 h: its approach point moved " + moved.ToString("F0") + " m (" + WayRound(Job.dockHeading) + ")";
+            ReplanLine("its approach point moved (decision 198 h)");
+            Log.Info("Sailing: " + Name + "'s way in is reckoned again from its approach point (" + refloodWhy + "), a slice a frame (decision 198 j).");
         }
 
-        // Near her approach point in her destination's chart (as near as her route's last point counts reached): her final approach.
-        private bool ArrivalApproachReached(RoutePoint p) =>
-            chartArriving && InHarbourChart && Job.berthKnown && RoutePoint.Distance(p, NavigationDestination()) < Math.Max(40, water.Length * 1.5f);
+        // Her final approach begins: with a line in, within FinalFromLineEnd of her lengths of the line's end (FollowLine ends the line
+        // at its last points); without one, near her approach point (as near as her route's last point counts reached), unless a fresh
+        // approach waits for the ship to be away from it first (approachAgain).
+        internal const double FinalFromLineEnd = 0.5;
+        private bool ArrivalApproachReached(RoutePoint p)
+        {
+            if (!chartArriving || !InHarbourChart || !Job.berthKnown) return false;
+            if (line != null) return RoutePoint.Distance(p, line[line.Count - 1].Point) < FinalFromLineEnd * Math.Max(10, water.Length);
+            return !approachAgain && RoutePoint.Distance(p, NavigationDestination()) < Math.Max(40, water.Length * 1.5f);
+        }
     }
 
     // ==== VoyageBacking ====
@@ -5760,7 +6492,7 @@ namespace ShipwrightAndTransport.Sailing
             double h = boat.Root.eulerAngles.y;
             if (!Backing.WindAhead(h, apparentFrom)) return false;
             if (!SternClear(water.Length))
-            { Log.Info("Sailing: " + Name + " can't back (decision 155): her way astern is blocked (" + water.Obstruction + ")."); return false; }
+            { Log.Info("Sailing: " + Name + " can't back (decision 155): its way astern is blocked (" + water.Obstruction + ")."); return false; }
             int side = throughWind ? -Backing.TurnSide(h, apparentFrom) : Backing.TurnSide(h, apparentFrom);
             // She turns where she lies, half her length astern of it: her hull's turn there (in two halves, each the way she turns) and
             // her way on from there clear.
@@ -5770,21 +6502,24 @@ namespace ShipwrightAndTransport.Sailing
             // Across the wind (decision 160): a heading on her new side only (run 20261011-152234 on DZ: 338 from 348, still on her
             // old side, was "her heading" at once, three times).
             int oldSide = TackNavigator.Side(apparentFrom, h);
+            // Each heading judged by the apparent wind the ship will feel on it once it gathers way (no heading is sailed while it backs).
+            var trueWind = Vector3.ProjectOnPlane(Wind.currentWind, Vector3.up);
+            var after = new HeadingWind(apparentFrom, WindFrom(), trueWind.magnitude, TackNavigator.ExpectedSpeed(0), 0);
             double target = Backing.Target(h, side, bearing, apparentFrom, deadZone, c =>
             {
                 if (throughWind && TackNavigator.Side(apparentFrom, c) == oldSide) return false;
                 double mid = NavigationMath.Normalize(h + side * Backing.Remaining(h, c, side) / 2);
                 return water.TurnClear(pivot, h, mid) && water.TurnClear(pivot, mid, c) && WayClear(pivot, c, look, guideFromPivot, guide);
-            }, Margin);
+            }, Margin, after);
             if (double.IsNaN(target))
-            { Log.Info("Sailing: " + Name + " can't back (decision 155): no clear, sailable heading to turn to from where she lies."); return false; }
+            { Log.Info("Sailing: " + Name + " can't back (decision 155): no clear, sailable heading to turn to from where it lies."); return false; }
             backing = true; backThroughWind = throughWind; backSide = side; backTarget = target; backFrom = p; backSince = Time.time; backSail = 1f;
             backBestRemaining = Backing.Remaining(h, target, side); backProgressAt = Time.time;
             // Bearing away or in irons before: their sail settings end here (SetSailTurn takes the backing's).
-            easing = false; weatherHelmSeconds = 0f; ironsSeconds = 0f; ironsSide = 0;
+            easing = false; easeSide = 0; weatherHelmSeconds = 0f; ironsSeconds = 0f; ironsSide = 0;
             float ahead = Vector3.Dot(boat.Body.velocity, boat.Root.forward);
-            Log.Info("Sailing: " + Name + " backs her square sail to go astern (decision 155: " + why + "): the apparent wind " +
-                NavigationMath.Delta(h, apparentFrom).ToString("F0") + " degrees off her bow, " + ahead.ToString("F2") + " m/s ahead; her bow to turn to " +
+            Log.Info("Sailing: " + Name + " backs its square sail to go astern (decision 155: " + why + "): the apparent wind " +
+                NavigationMath.Delta(h, apparentFrom).ToString("F0") + " degrees off its bow, " + ahead.ToString("F2") + " m/s ahead; its bow to turn to " +
                 (side > 0 ? "starboard" : "port") + (throughWind ? ", across the wind" : ", away from the wind") + ", round to " + target.ToString("F0") + " (" + Backing.Remaining(h, target, side).ToString("F0") + " degrees).");
             steeringTarget = Vector(Ahead(p, Backing.Steer(h, target, side), 120));
             SetSailTurn(); TraceFor(90);
@@ -5801,34 +6536,39 @@ namespace ShipwrightAndTransport.Sailing
             // Across the wind (decision 160), on her heading only with her sails able to draw on her new side (run 20261011-152531 on EA:
             // done 20 degrees short of her heading, the wind 17 degrees off her bow, she lay in irons going astern onto Cube).
             bool drawing = !backThroughWind || Math.Abs(NavigationMath.Delta(h, apparentFrom)) >= TackNavigator.BeatOff(DeadZone, Margin);
-            if ((remaining <= Backing.DoneWithin || remaining >= 360 - Backing.DoneWithin) && drawing) { EndBacking("she is on her heading", false, p); return true; }
-            if (Math.Abs(NavigationMath.Delta(h, apparentFrom)) > Backing.Abaft) { EndBacking("the wind is abaft her beam", false, p); return true; }
+            if ((remaining <= Backing.DoneWithin || remaining >= 360 - Backing.DoneWithin) && drawing) { EndBacking("it is on its heading", false, p); return true; }
+            if (Math.Abs(NavigationMath.Delta(h, apparentFrom)) > Backing.Abaft) { EndBacking("the wind is abaft its beam", false, p, remaining > Backing.DoneWithin && remaining < 360 - Backing.DoneWithin); return true; }
             if (remaining < backBestRemaining - Backing.ProgressDegrees) { backBestRemaining = remaining; backProgressAt = Time.time; }
             if (Backing.OutOfTime(Time.time - backSince, Time.time - backProgressAt))
-            { EndBacking((Time.time - backSince).ToString("F0") + " s backing, " + (Time.time - backProgressAt).ToString("F0") + " s since her bow last closed " + Backing.ProgressDegrees.ToString("F0") + " degrees on its heading", true, p); return true; }
+            { EndBacking((Time.time - backSince).ToString("F0") + " s backing, " + (Time.time - backProgressAt).ToString("F0") + " s since its bow last closed " + Backing.ProgressDegrees.ToString("F0") + " degrees on its heading", true, p); return true; }
             if (astern > Backing.MostLengths * water.Length) { EndBacking(astern.ToString("F0") + " m astern", true, p); return true; }
             // From her stern, 8 s of her sternway (decision 164's reach; run 20261011-163355 on EF: half her length from her middle saw under
             // a metre past her stern, and she backed onto east_dock_002 at 0.95 m/s).
             if (ahead < -0.3f && !SternClear(Mathf.Max(DriftLeast, -ahead * DriftSeconds)))
-            { EndBacking("her way astern closes (" + water.Obstruction + ")", true, p); return true; }
+            { EndBacking("its way astern closes (" + water.Obstruction + ")", true, p); return true; }
             backSail = (float)Backing.SailLimit(-ahead, backSail);
             steeringTarget = Vector(Ahead(p, Backing.Steer(h, backTarget, backSide), 120));
-            Status.Message = "Backing her sail: " + astern.ToString("F0") + " m astern, " + remaining.ToString("F0") + " degrees to turn to " + backTarget.ToString("F0") + ".";
+            Status.Message = "Backing its sail: " + astern.ToString("F0") + " m astern, " + remaining.ToString("F0") + " degrees to turn to " + backTarget.ToString("F0") + ".";
             return true;
         }
 
-        private void EndBacking(string how, bool failed, RoutePoint p)
+        // A backing ended with the wind abaft the beam short of its heading (`shortAbaft`) lets a change of side wear at once for
+        // WearAfterBacking s: the rest of its turn is a wear, which the in-port wait for a tack's speed would hold back.
+        private const double WearAfterBacking = 30;
+        private void EndBacking(string how, bool failed, RoutePoint p, bool shortAbaft = false)
         {
             backing = false;
             if (failed) backFails.Add(Time.time);
             double h = boat.Root.eulerAngles.y, apparentFrom = ApparentFrom();
-            Log.Info("Sailing: " + Name + " fills her sails again (decision 155: " + how + "): heading " + h.ToString("F0") + " (she was to turn to " +
+            Log.Info("Sailing: " + Name + " fills its sails again (decision 155: " + how + "): heading " + h.ToString("F0") + " (it was to turn to " +
                 backTarget.ToString("F0") + "), " + RoutePoint.Distance(backFrom, p).ToString("F0") + " m astern in " + (Time.time - backSince).ToString("F0") + " s" +
-                (failed ? "; a backing that failed (" + backFails.Count + " in " + (Backing.FailWindow / 60).ToString("F0") + " minutes)" : "") + ".");
+                (failed ? "; a backing that failed (" + backFails.Count + " in " + (Backing.FailWindow / 60).ToString("F0") + " minutes)" : "") +
+                (shortAbaft && navigator != null ? "; a wear allowed for " + WearAfterBacking.ToString("F0") + " s" : "") + ".");
             if (navigator != null)
             {
                 navigator.Restore(TackNavigator.Side(apparentFrom, h), h, apparentFrom, DeadZone);
-                navigator.Rechoose("she has backed round");
+                if (shortAbaft) navigator.AllowWear(WearAfterBacking);
+                navigator.Rechoose("it has backed round");
             }
             SetSailTurn(); TraceFor(30);
         }
@@ -5886,10 +6626,10 @@ namespace ShipwrightAndTransport.Sailing
             {
                 driftLoggedAt = Time.time + DriftLogEvery;
                 Log.Info("Sailing: " + Name + " moves " + motion + " at " + speed.ToString("F2") + " m/s toward " + what + " within " + blockedAt.ToString("F0") +
-                    " m (decision 164: her bow " + Vector3.Angle(v, forward).ToString("F0") + " degrees off her motion)" + (blockedAt <= near ? "; hemmed in." : "; her course is chosen again."));
+                    " m (decision 164: its bow " + Vector3.Angle(v, forward).ToString("F0") + " degrees off its motion)" + (blockedAt <= near ? "; hemmed in." : "; its course is chosen again."));
             }
             if (blockedAt <= near) return driftNear = "Moving " + motion + " onto " + what + " within " + blockedAt.ToString("F0") + " m";
-            if (Time.time >= driftRechooseAt) { driftRechooseAt = Time.time + DriftHold; navigator?.Rechoose("she moves " + motion + " toward " + what); }
+            if (Time.time >= driftRechooseAt) { driftRechooseAt = Time.time + DriftHold; navigator?.Rechoose("it moves " + motion + " toward " + what); }
             return null;
         }
     }
@@ -5902,10 +6642,8 @@ namespace ShipwrightAndTransport.Sailing
     internal sealed partial class Voyage
     {
         private float visualRetryAt, sailLimit = 1;
-        // Her sails' plans this minute (UpdateSailSafety, for the minute line): how many, the longest and the total, in milliseconds.
+        // Times the sails' plans (UpdateSailSafety) for the scorecard.
         private static readonly System.Diagnostics.Stopwatch sailClock = new System.Diagnostics.Stopwatch();
-        private int sailPlans;
-        private double sailMostMs, sailTotalMs;
 
         private void TryCreateHelmsman()
         {
@@ -5920,25 +6658,36 @@ namespace ShipwrightAndTransport.Sailing
             catch (Exception e) { Log.Warn("Sailing: helmsman visual deferred; sailing continues: " + e.Message); }
         }
 
-        private void UpdateSailSafety(float dt, float limit = 1)
+        // `underWay`: called from the steering (the scorecard counts the ship's speed and helm then).
+        private void UpdateSailSafety(float dt, float limit = 1, bool underWay = false)
         {
-            float raw = (float)CourseSafety.HeelDegrees(boat.Root.right.y, boat.Root.up.y);
             var previous = heel.State;
+            int reefs = heel.Reefs;
             TakingWater = waterIngress.Sample(dt);
-            heel.Tick(raw, dt, TakingWater);
+            heel.Tick(dt, TakingWater);
+            if (heel.Reefs != reefs) Log.Info("Sailing: " + Name + " reefs for the sea over its deck (" + heel.ReefWhy + "): its sail to " + heel.Deployment.ToString("P0") + ".");
             tickClock += dt;
             if (previous != heel.State || tickClock >= .5f || SailLimitChanged(sailLimit, limit) || sails.TurnChanged)
             {
                 tickClock = 0; sailLimit = limit;
-                // Overflow always owns the retained-sail policy, including while
-                // awaiting geometry or recovering an anchor. Use native winches.
                 // Timed for the minute line (the review of 2026-10-13: her sails' plans, the trim's search over every yard angle and decision
                 // 199's mix, run outside NavigateTick's clock, so no line measured them).
                 sailClock.Restart();
-                sails.PlanLimited((float)heel.Deployment, heel.State == HeelState.Urgent, limit);
+                sails.PlanLimited((float)heel.Deployment, limit);
                 sailClock.Stop();
-                double planMs = sailClock.Elapsed.TotalMilliseconds;
-                sailPlans++; sailTotalMs += planMs; if (planMs > sailMostMs) sailMostMs = planMs;
+                float ahead = Vector3.Dot(boat.Body.velocity, boat.Root.forward);
+                double windSpeed = underWay ? Vector3.ProjectOnPlane(Wind.currentWind, Vector3.up).magnitude : double.NaN;
+                double apparentOff = underWay ? NavigationMath.Delta(boat.Root.eulerAngles.y, ApparentFrom()) : double.NaN;
+                double curve = underWay ? UpwindLimits.SpeedShare(apparentOff, RigMinimum) : double.NaN;
+                // The speed per unit sampled with the sails full (the voyage's cap and the heel governor's at 1), under way ahead and not
+                // turning (SailControlAdapters.SamplePerUnit).
+                if (underWay && limit >= 0.999f && heel.Deployment >= 0.999 && ahead >= 1 && !backing && navigator != null &&
+                    navigator.State != Manoeuvre.Tacking && navigator.State != Manoeuvre.Wearing)
+                    sails.SamplePerUnit(ahead, apparentOff, Time.time);
+                sailsHelm = underWay ? sails.HelmNeeded(ahead) : double.NaN;
+                double need = score.Steady ? sailsHelm : double.NaN;
+                double used = helm == null ? double.NaN : helm.Demand;
+                score.Plan(sailClock.Elapsed.TotalMilliseconds, sails.UnrolledShare(), underWay, ahead, curve, windSpeed, need, used);
                 if (previous != heel.State) Log.Info("Sailing: " + Name + ": heel response changed to " + heel.State + "; deck depth=" + DeckOverflowDepth + "m.");
                 // Decision 199: a sail taken in or set, or her sails chosen anew.
                 string reefNote = sails.TakeReefNote();
@@ -5956,7 +6705,7 @@ namespace ShipwrightAndTransport.Sailing
         // controller from the helm it leaves amidships: a weather helm or a spin noted before reefed her on resuming before her bow turned.
         private void HoldNavigation(float dt, float deploymentLimit)
         {
-            helm.Demand = 0; helm.Apply(); ResetHelmWatch(); heading.Reset();
+            helm.Demand = 0; helm.Apply(); ResetHelmWatch(); heading.Reset(); score.Unsteady();
             if (!boat.Body.isKinematic && (background == null || background.Mode == SimulationMode.Physical))
                 UpdateSailSafety(dt, deploymentLimit);
             navigationClock = 1;
@@ -5970,6 +6719,12 @@ namespace ShipwrightAndTransport.Sailing
         private static readonly System.Reflection.MethodInfo LoadIsland = AccessTools.Method(typeof(IslandHorizon), "LoadIslandScene");
         private static readonly System.Reflection.FieldInfo IslandUnloading = AccessTools.Field(typeof(IslandHorizon), "unloading");
         internal bool KeepsIsland(IslandHorizon island) => sails != null && voyageIslands.Contains(island);
+        // An island's scene near her: kept loaded (its unload held off) within LeaseKeep of its load distance from its centre, loaded within
+        // LeaseLoad. The gap between them keeps a ship that crosses the outer line out and back from loading a scene a second time, which
+        // crashes the game (Dragon Cliffs' scene 9, the probe's run 20261123-003107).
+        internal const double LeaseKeep = 2000, LeaseLoad = 1000;
+        internal static bool LeaseKeeps(double fromCentre, double loadDistance) => fromCentre <= loadDistance + LeaseKeep;
+        internal static bool LeaseLoads(double fromCentre, double loadDistance) => fromCentre <= loadDistance + LeaseLoad;
 
         private void EnsureVoyageScenes()
         {
@@ -5991,11 +6746,44 @@ namespace ShipwrightAndTransport.Sailing
                 // destination is charted (beyond its load distance and 2 km from its centre the rule below would let it go).
                 bool berthIsland = Job.berthKnown && HorizontalDistance(here, Vector(Job.destination)) < ArrivalChartFrom &&
                     HorizontalDistance(Vector(Job.destination), centre) < island.islandLoadDistance;
-                if (!destinationApproach && !berthIsland && HorizontalDistance(here, centre) > island.islandLoadDistance + 2000) continue;
+                double fromCentre = HorizontalDistance(here, centre);
+                if (!destinationApproach && !berthIsland && !LeaseKeeps(fromCentre, island.islandLoadDistance)) continue;
                 voyageIslands.Add(island);
-                if (!island.SceneLoaded() && !SceneManager.GetSceneByBuildIndex(island.islandIndex).isLoaded && !(bool)IslandUnloading.GetValue(island))
+                if ((destinationApproach || berthIsland || LeaseLoads(fromCentre, island.islandLoadDistance)) && !island.SceneLoaded() &&
+                    !IslandScenes.Loaded(island) && !(bool)IslandUnloading.GetValue(island) && IslandScenes.MayLoad(island, Name))
                     LoadIsland.Invoke(island, null);
             }
+        }
+    }
+
+    // ==== IslandScenes ====
+
+    // Island scenes by their build index. A modded island's index can lie past the game's build (Better Ports' Bottleneck, 67, its
+    // scene loaded by path), where SceneManager.GetSceneByBuildIndex throws. A scene loaded a second time in one process crashes the
+    // game (Dragon Cliffs' 9, Kicia Bay's 27), so the sailor never loads a scene again once it was unloaded in this process.
+    internal static class IslandScenes
+    {
+        private static int buildCount = -1;
+        private static readonly HashSet<int> unloaded = new HashSet<int>(), refused = new HashSet<int>();
+
+        internal static bool InBuild(int index, int count) => index >= 0 && index < count;
+
+        // In the build, the scene's own isLoaded (IslandHorizon.SceneLoaded is true from the load's start); outside it, that flag.
+        internal static bool Loaded(IslandHorizon island)
+        {
+            if (buildCount < 0) buildCount = SceneManager.sceneCountInBuildSettings;
+            return InBuild(island.islandIndex, buildCount) ? SceneManager.GetSceneByBuildIndex(island.islandIndex).isLoaded : island.SceneLoaded();
+        }
+
+        internal static void NoteUnload(IslandHorizon island) => unloaded.Add(island.islandIndex);
+
+        // False for a scene unloaded in this process (logged once an island).
+        internal static bool MayLoad(IslandHorizon island, string ship)
+        {
+            if (!unloaded.Contains(island.islandIndex)) return true;
+            if (refused.Add(island.islandIndex))
+                Log.Info("Sailing: " + ship + " doesn't load " + island.name + "'s scene: it was unloaded in this game, and a second load crashes the game.");
+            return false;
         }
     }
 
@@ -6332,7 +7120,12 @@ namespace ShipwrightAndTransport.Sailing
         }
 
         public static bool HorizonPrefix(BoatHorizon __instance) => Voyages.AllowHorizonUpdate(__instance);
-        public static bool IslandUnloadPrefix(IslandHorizon __instance) => !Voyages.KeepsIsland(__instance);
+        public static bool IslandUnloadPrefix(IslandHorizon __instance)
+        {
+            bool unload = !Voyages.KeepsIsland(__instance);
+            if (unload && __instance) IslandScenes.NoteUnload(__instance);
+            return unload;
+        }
 
         // Decision 225 (22): Custom Island API (Shattered Seas' islands; 1.0.2 decompiled 2026-11-03) unloads its own islands in its own
         // prefix on IslandHorizon.UnloadIslandScene, which starts its unload whatever IslandUnloadPrefix returns (HarmonyX runs every
@@ -6451,7 +7244,7 @@ namespace ShipwrightAndTransport.Sailing
         internal BodyFlag[] CaptureBodyFlags() => bodyFlags.Where(p=>p.Key).Select(p=>new BodyFlag {path=BodyKey(p.Key),kinematic=p.Value}).ToArray();
 
         // `underWay`: she had left her berth before; her clock then goes on from the hour it last moved her, so the game hours
-        // between a save (the sailor lets go) and this resume count (N13: launch 5's S6 saw 0 m in 2.26 h). At a departure by
+        // between a save and this resume after its load count (N13: launch 5's S6 saw 0 m in 2.26 h). At a departure by
         // the clock Voyages counts from her departure hour instead.
         internal void ResumeCached(VoyageJob saved, bool underWay)
         {
@@ -6466,7 +7259,7 @@ namespace ShipwrightAndTransport.Sailing
             var manifest=new Dictionary<string,bool>(StringComparer.Ordinal);
             foreach (var p in saved.physics) manifest[p.path]=p.kinematic;
             if (!manifest.ContainsKey(BodyKey(boat.Body)))
-                throw new InvalidOperationException("Saved physics manifest does not match vessel: her hull's body is not in it. Saved="+string.Join(";",saved.physics.Select(p=>p.path))+"; loaded="+string.Join(";",bodyFlags.Keys.Select(BodyKey)));
+                throw new InvalidOperationException("Saved physics manifest does not match vessel: its hull's body is not in it. Saved="+string.Join(";",saved.physics.Select(p=>p.path))+"; loaded="+string.Join(";",bodyFlags.Keys.Select(BodyKey)));
             // Each body rebound by its path; one the saved list hasn't keeps its own flag, and a saved one that is gone is passed
             // over, both logged (run 20261010-102301: the sail's collider bodies, col_parent and its cols, were there at the far
             // start but not when her list was taken at the berth, and every far departure was refused, "does not match vessel").
@@ -6479,7 +7272,7 @@ namespace ShipwrightAndTransport.Sailing
             var loadedKeys=new HashSet<string>(bodyFlags.Keys.Select(BodyKey),StringComparer.Ordinal);
             var gone=manifest.Keys.Where(k=>!loadedKeys.Contains(k)).ToArray();
             if (added.Count>0 || gone.Length>0)
-                Log.Info("Sailing: her bodies differ from the list saved at the berth: new, kept as they are: "+(added.Count>0?string.Join(", ",added.ToArray()):"none")+
+                Log.Info("Sailing: its bodies differ from the list saved at the berth: new, kept as they are: "+(added.Count>0?string.Join(", ",added.ToArray()):"none")+
                     "; gone: "+(gone.Length>0?string.Join(", ",gone):"none")+".");
             var cached=boat.Items.GetCachedItems();
             expectedCargoIds=ExpectedCargo(cached);
@@ -6511,9 +7304,8 @@ namespace ShipwrightAndTransport.Sailing
         // Called as she starts going out of the player's range (BeginCaching): the voyage lets go of her berth if she
         // hadn't left it yet.
         internal Action LeavingPhysics;
-        // Let go for a game save (Voyage.CaptureForSave): Dispose bridges the 2 s until her sailor takes her back (decision 221).
-        internal bool ForSave;
-        internal const float SaveBridgeSeconds = 10f;
+        // Before a game save while the clock carries the ship (Voyage.SaveStep.AlignCargo): the packed cargo turned to the hull's heading.
+        internal void AlignCargoForSave() { if (!wasDisposed && boat.Items) RotateCachedCargo(); }
 
         internal BackgroundTravel(BoatContext boat, VoyageJob job, double arriveHour)
         {
@@ -6622,7 +7414,7 @@ namespace ShipwrightAndTransport.Sailing
                 try
                 {
                     // Once per state: a held voyage retries, and run 20261009-211324 logged the same lines 3519 times.
-                    string why = "Sailing: the cargo handover timed out in " + Mode + ": items loaded " + ItemsLoaded.GetValue(boat.Items) + ", cargo in her cache " +
+                    string why = "Sailing: the cargo handover timed out in " + Mode + ": items loaded " + ItemsLoaded.GetValue(boat.Items) + ", cargo in its cache " +
                         boat.Items.HasLocalItems() + ", safe to enable physics " + boat.Items.SafeToEnableBoatPhysics() + ", the game loading boat items " +
                         GameState.loadingBoatLocalItems + ", debug kinematic " + Debugger.debugForceKinematicBoat + ", retiring cargo left " +
                         (retiringCargo == null ? 0 : retiringCargo.Count(p => p)) + "; cargo: " +
@@ -6644,7 +7436,7 @@ namespace ShipwrightAndTransport.Sailing
                     ReturnedToPhysics = true;
                     Message = "Full physics restored after the cargo handover timed out";
                     CargoLeftCached = true;
-                    Log.Warn("Sailing: her physics are back though her cargo handover timed out; her cargo stays as it stands.");
+                    Log.Warn("Sailing: its physics are back though its cargo handover timed out; its cargo stays as it stands.");
                     previousObserver = ObserverPosition();
                     return false;
                 }
@@ -6663,11 +7455,11 @@ namespace ShipwrightAndTransport.Sailing
                     try
                     {
                         var directory = PrefabsDirectory.instance ? PrefabsDirectory.instance.directory : null;
-                        Log.Info("Sailing: her cargo cached by the game (" + expectedCargoIds.Length + "): " + string.Join(", ", boat.Items.GetCachedItems().Where(p => p != null).Select(p =>
+                        Log.Info("Sailing: its cargo cached by the game (" + expectedCargoIds.Length + "): " + string.Join(", ", boat.Items.GetCachedItems().Where(p => p != null).Select(p =>
                             p.instanceId + " " + (directory != null && p.prefabIndex >= 0 && p.prefabIndex < directory.Length && directory[p.prefabIndex] ? directory[p.prefabIndex].name : "prefab " + p.prefabIndex) +
                             (p.crateId > 0 ? " (in crate " + p.crateId + ")" : "")).ToArray()) + ".");
                     }
-                    catch (Exception e) { Log.Warn("Sailing: listing her cached cargo failed: " + e.Message); }
+                    catch (Exception e) { Log.Warn("Sailing: listing its cached cargo failed: " + e.Message); }
                     handover.CommitCached(handover.Generation);
                     EnterClock();
                     Message = "Far travel by the clock; cargo cached by vanilla";
@@ -6682,8 +7474,8 @@ namespace ShipwrightAndTransport.Sailing
                 if (!unpackedFarLogged && ((bool)ItemsLoaded.GetValue(boat.Items) || !boat.Items.HasLocalItems()))
                 {
                     unpackedFarLogged = true;
-                    Log.Info("Sailing: her cache is unpacked while the clock carries her: items loaded " + ItemsLoaded.GetValue(boat.Items) + ", cargo in her cache " +
-                        boat.Items.HasLocalItems() + ", horizon close " + boat.Horizon.closeToPlayer + ", the player " + boat.ObserverDistance.ToString("F0") + " m from her, at " + boat.StablePosition.ToString("F0") + ".");
+                    Log.Info("Sailing: its cache is unpacked while the clock carries it: items loaded " + ItemsLoaded.GetValue(boat.Items) + ", cargo in its cache " +
+                        boat.Items.HasLocalItems() + ", horizon close " + boat.Horizon.closeToPlayer + ", the player " + boat.ObserverDistance.ToString("F0") + " m from it, at " + boat.StablePosition.ToString("F0") + ".");
                 }
                 // Check observer motion even on ticks too short to move her.
                 var here = boat.StablePosition;
@@ -6706,7 +7498,7 @@ namespace ShipwrightAndTransport.Sailing
                 if (spawnedAt >= 0 && !spawnShiftLogged && shiftCount != spawnShifts && Time.realtimeSinceStartup - spawnedAt < 3f)
                 {
                     spawnShiftLogged = true;
-                    Log.Warn("Sailing: the world shifted " + (Time.realtimeSinceStartup - spawnedAt).ToString("F2") + " s after her cargo spawned; items not yet on her deck may be left behind.");
+                    Log.Warn("Sailing: the world shifted " + (Time.realtimeSinceStartup - spawnedAt).ToString("F2") + " s after its cargo spawned; items not yet on its deck may be left behind.");
                 }
                 // Dizzy Sailwind Fixes (the user, 2026-10-09: with it installed, 5 items of one crate stayed out of it after her cargo
                 // came back, runs 20261009-194114 to -204550): 3 s after her cargo is back, an item still held for a crate that is
@@ -6923,16 +7715,16 @@ namespace ShipwrightAndTransport.Sailing
             string why = CachePending() ? SpawnShiftRisk() : null;
             if (why != null && spawnHeldFor < SpawnHoldLimit)
             {
-                if (spawnHoldWhy == null) Log.Info("Sailing: her cargo waits to come back: " + why + ".");
+                if (spawnHoldWhy == null) Log.Info("Sailing: its cargo waits to come back: " + why + ".");
                 spawnHeld = true; spawnHoldWhy = why; spawnHeldFor += dt;
                 return;
             }
             if (why != null && !spawnHoldGivenUp)
             {
                 spawnHoldGivenUp = true;
-                Log.Warn("Sailing: her cargo waited " + SpawnHoldLimit.ToString("F0") + " s for the world's shifts (" + why + "); it comes back now.");
+                Log.Warn("Sailing: its cargo waited " + SpawnHoldLimit.ToString("F0") + " s for the world's shifts (" + why + "); it comes back now.");
             }
-            else if (why == null && spawnHeld) Log.Info("Sailing: her cargo comes back after waiting " + spawnHeldFor.ToString("F1") + " s (last: " + spawnHoldWhy + ").");
+            else if (why == null && spawnHeld) Log.Info("Sailing: its cargo comes back after waiting " + spawnHeldFor.ToString("F1") + " s (last: " + spawnHoldWhy + ").");
             spawnHeld = false;
         }
 
@@ -6945,8 +7737,8 @@ namespace ShipwrightAndTransport.Sailing
             var ids = new HashSet<int>(items.Select(p => p.instanceId));
             var away = items.Where(p => p.crateId > 0 && !ids.Contains(p.crateId)).ToList();
             if (away.Count > 0)
-                Log.Info("Sailing: " + away.Count + " cached item(s) of hers lie in a crate that is not aboard her (" +
-                    string.Join(", ", away.Select(p => p.instanceId + " in crate " + p.crateId).ToArray()) + "); her restore doesn't wait for them.");
+                Log.Info("Sailing: " + away.Count + " cached item(s) of its own lie in a crate that is not aboard it (" +
+                    string.Join(", ", away.Select(p => p.instanceId + " in crate " + p.crateId).ToArray()) + "); its restore doesn't wait for them.");
             return items.Where(p => p.crateId <= 0 || ids.Contains(p.crateId)).Select(p => p.instanceId).ToArray();
         }
 
@@ -6971,7 +7763,7 @@ namespace ShipwrightAndTransport.Sailing
                 inventory.InsertItem(item); inserted++;
             }
             if (inserted > 0 || missing > 0)
-                Log.Info("Sailing: her cargo back: " + inserted + " item(s) put into their crates the game's way" + (missing > 0 ? "; " + missing + " whose crate is not in the world" : "") + ".");
+                Log.Info("Sailing: its cargo back: " + inserted + " item(s) put into their crates the game's way" + (missing > 0 ? "; " + missing + " whose crate is not in the world" : "") + ".");
         }
 
         private List<CargoAttachment> CargoSamples()
@@ -7036,17 +7828,12 @@ namespace ShipwrightAndTransport.Sailing
                 {
                     if (boat.Horizon && boat.Body)
                     {
-                        // Decision 221: let go for a game save while she sails in physics beyond the game's 1 km (her sailor takes her back
-                        // 2 s after it, StartSailing), she stays "close" until then (the game's own check waits out SaveBridgeSeconds), so
-                        // the game doesn't pack her cargo and the clock and the restore don't follow each save (Claude's call, decision 229).
-                        bool bridge = ForSave && mode == SimulationMode.Physical && boat.Valid && !boat.PlayerAboard &&
-                            boat.ObserverDistance > 1000 && boat.ObserverDistance <= DistanceHandover.SailWithin;
-                        boat.Horizon.closeToPlayer = boat.Valid && (boat.PlayerAboard || boat.ObserverDistance <= 1000 || bridge);
+                        boat.Horizon.closeToPlayer = boat.Valid && (boat.PlayerAboard || boat.ObserverDistance <= 1000);
                         // Let vanilla finish any in-flight cargo restore, keeping the hull frozen until ready.
                         boat.Body.isKinematic = !boat.Horizon.closeToPlayer || !boat.Items || !boat.Items.SafeToEnableBoatPhysics() ||
                             !GameState.playing || GameState.currentlyLoading || GameState.justStarted || GameState.changingStartRegion ||
                             GameState.recovering || GameState.currentShipyard || GameState.sleeping || Debugger.debugForceKinematicBoat || Time.timeScale == 0;
-                        HorizonCooldown.SetValue(boat.Horizon, bridge ? SaveBridgeSeconds : 0f);
+                        HorizonCooldown.SetValue(boat.Horizon, 0f);
                     }
                 }
             }
@@ -7483,6 +8270,9 @@ namespace ShipwrightAndTransport.Sailing
         private readonly Collider[] overlaps=new Collider[96];
         private Rigidbody[] traffic=Array.Empty<Rigidbody>();
         private readonly Dictionary<Rigidbody, Behaviour> customTraffic = new Dictionary<Rigidbody, Behaviour>();
+        // EconomyOverhaul's drawn traders: kinematic bodies it moves at each trader's velocity (real x, z, m/s), read at each traffic scan.
+        private readonly Dictionary<Rigidbody, Vector2> traderTraffic = new Dictionary<Rigidbody, Vector2>();
+        private bool tradersNoted;
         private float trafficAt;
         private readonly Dictionary<int,IslandEnvelope> islands=new Dictionary<int,IslandEnvelope>();
         private float islandsAt;
@@ -7515,6 +8305,8 @@ namespace ShipwrightAndTransport.Sailing
         internal float KeelFore { get; }
         internal float KeelAft { get; }
         internal string Obstruction { get; private set; }
+        // When the last traffic test that met a boat predicted the meeting (s from now).
+        internal double TrafficWhen { get; private set; }
         internal IslandHorizon DestinationIsland { get; private set; }
         // The layers of her physical hull, for the game's layer collision matrix (Obstacle).
         private readonly int[] hullLayers;
@@ -7535,8 +8327,10 @@ namespace ShipwrightAndTransport.Sailing
         }
         private bool Touches(int layer) => (HitMask() & (1<<layer))!=0;
         // Her clearance checks under way (Check, TurnClear; not the harbour chart's cells, which its own line counts) since the voyage
-        // last read them, for the minute line's cost of her navigation (the review of 2026-10-11 night).
+        // last read them, and their time (Stopwatch ticks), for the minute line's cost of the navigation and the scorecard.
         internal int Checks;
+        internal long CheckTicks;
+        internal double CheckMs => CheckTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
         private readonly HashSet<Collider> passedThrough=new HashSet<Collider>();
         private readonly HashSet<Collider> described=new HashSet<Collider>();
         internal NavigationWater(BoatContext boat,Func<Collider,bool> own,Func<Vector3> velocity=null)
@@ -7551,23 +8345,8 @@ namespace ShipwrightAndTransport.Sailing
             var inHull=new List<Collider>();
             foreach (var c in hull)
             {
-                Bounds local;
-                if (c is MeshCollider mesh && mesh.sharedMesh) local=mesh.sharedMesh.bounds;
-                else if (c is BoxCollider box) local=new Bounds(box.center,box.size);
-                else if (c is CapsuleCollider capsule)
-                {
-                    var size=Vector3.one*(capsule.radius*2);
-                    size[capsule.direction]=Mathf.Max(capsule.height,capsule.radius*2);
-                    local=new Bounds(capsule.center,size);
-                }
-                else if (c is SphereCollider sphere) local=new Bounds(sphere.center,Vector3.one*(sphere.radius*2));
-                else throw new NotSupportedException("Unsupported physical hull collider: "+c.GetType().Name);
-                var piece=new Bounds(boat.Root.InverseTransformPoint(c.transform.TransformPoint(local.center)),Vector3.zero);
-                for (int i=0;i<8;++i)
-                {
-                    var p=local.center+Vector3.Scale(local.extents,new Vector3((i&1)==0?-1:1,(i&2)==0?-1:1,(i&4)==0?-1:1));
-                    piece.Encapsulate(boat.Root.InverseTransformPoint(c.transform.TransformPoint(p)));
-                }
+                if (!LocalBounds(c,out var local)) throw new NotSupportedException("Unsupported physical hull collider: "+c.GetType().Name);
+                var piece=InFrame(c,local,boat.Root.worldToLocalMatrix);
                 // Decision 208 (the user, 2026-10-13: "ignore hull pieces far outside of ship"): a piece lying wholly FarOutside or more
                 // from her origin is no part of her hull (the test games' ShipyardExpansion put two cabin colliders of its Jong parts about
                 // 75 km off her, so she measured 61 by 44 km and was refused).
@@ -7579,7 +8358,7 @@ namespace ShipwrightAndTransport.Sailing
                 inHull.Add(c);
                 bounds.Encapsulate(piece.min); bounds.Encapsulate(piece.max);
             }
-            if (leftOut.Count>0) Log.Info("Navigation envelope: hull pieces lying far outside her left out (decision 208): "+string.Join("; ",leftOut.ToArray())+".");
+            if (leftOut.Count>0) Log.Info("Navigation envelope: hull pieces lying far outside it left out (decision 208): "+string.Join("; ",leftOut.ToArray())+".");
             hull=inHull.ToArray();
             if (hull.Length==0 || bounds.size.sqrMagnitude<0.01f)
                 throw new NotSupportedException("No measurable physical hull geometry.");
@@ -7598,6 +8377,59 @@ namespace ShipwrightAndTransport.Sailing
             if (boat.Root && KeptKeel.TryGetValue(boat.Root.GetInstanceID(),out float kept)) { keelDepth=kept; keelMeasured=true; keelLogged=kept; }
             Log.Info($"Navigation envelope: local hull bounds={bounds}; radius={Radius}; draft={Draft}; length={Length}; position={boat.Root.position}.");
             if (Radius>15 || Length>65 || Draft>12) throw new NotSupportedException("Hull clearance envelope exceeds this local planner's limits.");
+        }
+
+        // A collider's bounds in its own transform's frame; false for a kind not read.
+        private static bool LocalBounds(Collider c,out Bounds local)
+        {
+            if (c is MeshCollider mesh && mesh.sharedMesh) local=mesh.sharedMesh.bounds;
+            else if (c is BoxCollider box) local=new Bounds(box.center,box.size);
+            else if (c is CapsuleCollider capsule)
+            {
+                var size=Vector3.one*(capsule.radius*2);
+                size[capsule.direction]=Mathf.Max(capsule.height,capsule.radius*2);
+                local=new Bounds(capsule.center,size);
+            }
+            else if (c is SphereCollider sphere) local=new Bounds(sphere.center,Vector3.one*(sphere.radius*2));
+            else { local=default; return false; }
+            return true;
+        }
+
+        // `local`, in `c`'s frame, as bounds in the frame `toFrame` maps world points into (its eight corners).
+        private static Bounds InFrame(Collider c,Bounds local,Matrix4x4 toFrame)
+        {
+            var piece=new Bounds(toFrame.MultiplyPoint3x4(c.transform.TransformPoint(local.center)),Vector3.zero);
+            for (int i=0;i<8;++i)
+            {
+                var p=local.center+Vector3.Scale(local.extents,new Vector3((i&1)==0?-1:1,(i&2)==0?-1:1,(i&4)==0?-1:1));
+                piece.Encapsulate(toFrame.MultiplyPoint3x4(c.transform.TransformPoint(p)));
+            }
+            return piece;
+        }
+
+        // A traffic boat's outline for TrafficPrediction from its colliders in metres in its body's frame (its position and rotation),
+        // the longer level axis taken as its length; pieces FarOutside or more from the body left out. Measured once while it is traffic.
+        // shortcut: a boat with no readable collider counts as 15 m by 5 m; replace if one is seen in a log.
+        private struct TrafficShape { internal TrafficPrediction.Hull Hull; internal bool AlongX; }
+        private readonly Dictionary<Rigidbody,TrafficShape> trafficShapes=new Dictionary<Rigidbody,TrafficShape>();
+        private TrafficShape TrafficHull(Rigidbody body)
+        {
+            if (trafficShapes.TryGetValue(body,out var known)) return known;
+            var bounds=new Bounds(); bool any=false;
+            var toBody=Matrix4x4.TRS(body.transform.position,body.transform.rotation,Vector3.one).inverse;
+            foreach (var c in body.GetComponentsInChildren<Collider>())
+            {
+                if (c.isTrigger || !c.enabled || c.attachedRigidbody!=body || !LocalBounds(c,out var local)) continue;
+                var piece=InFrame(c,local,toBody);
+                if (piece.SqrDistance(Vector3.zero)>=FarOutside*FarOutside) continue;
+                if (any) bounds.Encapsulate(piece); else { bounds=piece; any=true; }
+            }
+            bool alongX=any && bounds.size.x>bounds.size.z;
+            var shape=new TrafficShape { AlongX=alongX, Hull=!any ? new TrafficPrediction.Hull(7.5,7.5,2.5) : alongX
+                ? new TrafficPrediction.Hull(Mathf.Max(0,bounds.max.x),Mathf.Max(0,-bounds.min.x),Mathf.Max(Mathf.Abs(bounds.min.z),Mathf.Abs(bounds.max.z)))
+                : new TrafficPrediction.Hull(Mathf.Max(0,bounds.max.z),Mathf.Max(0,-bounds.min.z),Mathf.Max(Mathf.Abs(bounds.min.x),Mathf.Abs(bounds.max.x))) };
+            trafficShapes[body]=shape;
+            return shape;
         }
         private static float SeaLevel() => Crest.OceanRenderer.Instance ? Crest.OceanRenderer.Instance.SeaLevel : 0f;
 
@@ -7629,7 +8461,7 @@ namespace ShipwrightAndTransport.Sailing
             if (float.IsNaN(keelLogged) || Mathf.Abs(keelDepth-keelLogged)>0.1f)
             {
                 keelLogged=keelDepth;
-                Log.Info("Navigation: her keel floats " + keelDepth.ToString("F2") + " m deep (her mean, averaged); the clearance sweep reaches " + (keelDepth+KeelMargin).ToString("F2") + " m.");
+                Log.Info("Navigation: its keel floats " + keelDepth.ToString("F2") + " m deep (its mean, averaged); the clearance sweep reaches " + (keelDepth+KeelMargin).ToString("F2") + " m.");
             }
         }
 
@@ -7677,9 +8509,9 @@ namespace ShipwrightAndTransport.Sailing
         internal bool ClearWide(RoutePoint from,RoutePoint to,float radius,bool seabed=false) => Check(from,to,Mathf.Max(Radius,radius),seabed);
         internal bool TrafficClear(RoutePoint from,RoutePoint to) => ClearHull(from,to) &&
             MovingTrafficClear(from,to,Vector3.ProjectOnPlane(velocity(),Vector3.up).magnitude);
-        // Boats under way only (decisions 102, 109: traffic makes her give way, it never blocks her course).
-        internal bool MovingClear(RoutePoint from,RoutePoint to) =>
-            MovingTrafficClear(from,to,Vector3.ProjectOnPlane(velocity(),Vector3.up).magnitude);
+        // Boats under way only: the chooser's traffic test and the give-way's. `heading`: her hull's heading along the way (NaN: her own now).
+        internal bool MovingClear(RoutePoint from,RoutePoint to,double heading=double.NaN) =>
+            MovingTrafficClear(from,to,Vector3.ProjectOnPlane(velocity(),Vector3.up).magnitude,heading);
         internal bool VelocityTrafficClear(RoutePoint from)
         {
             var current=velocity();
@@ -7696,7 +8528,7 @@ namespace ShipwrightAndTransport.Sailing
             // destination separately and replans this approach after native loading.
             foreach (var island in tracker.islands)
             {
-                if (!island || island.islandIndex<=0 || island.SceneLoaded() && SceneManager.GetSceneByBuildIndex(island.islandIndex).isLoaded) continue;
+                if (!island || island.islandIndex<=0 || island.SceneLoaded() && IslandScenes.Loaded(island)) continue;
                 if (!islands.TryGetValue(island.islandIndex,out var envelope))
                     envelope=new IslandEnvelope { Centre=FloatingOriginManager.instance.ShiftingPosToRealPos(island.GetPosition()), Radius=island.islandLoadDistance };
                 var centre=new RoutePoint(envelope.Centre.x,envelope.Centre.z);
@@ -7720,6 +8552,12 @@ namespace ShipwrightAndTransport.Sailing
         }
         private bool Check(RoutePoint from,RoutePoint to,float radius,bool seabed,bool box=false)
         {
+            long started=System.Diagnostics.Stopwatch.GetTimestamp();
+            try { return CheckTimed(from,to,radius,seabed,box); }
+            finally { CheckTicks+=System.Diagnostics.Stopwatch.GetTimestamp()-started; }
+        }
+        private bool CheckTimed(RoutePoint from,RoutePoint to,float radius,bool seabed,bool box)
+        {
             if (!RoutePlanner.Finite(from) || !RoutePlanner.Finite(to) || !FloatingOriginManager.instance) return false;
             var tracker=IslandDistanceTracker.instance;
             if (!tracker || tracker.islands==null || tracker.islands.Count==0) { Obstruction="Island registry unavailable"; return false; }
@@ -7728,7 +8566,7 @@ namespace ShipwrightAndTransport.Sailing
             foreach (var island in tracker.islands)
             {
                 if (!island || island.islandIndex<=0) continue;
-                if (island.SceneLoaded() && SceneManager.GetSceneByBuildIndex(island.islandIndex).isLoaded) continue;
+                if (island.SceneLoaded() && IslandScenes.Loaded(island)) continue;
                 IslandEnvelope envelope;
                 if (!islands.TryGetValue(island.islandIndex,out envelope))
                     envelope=new IslandEnvelope {Centre=FloatingOriginManager.instance.ShiftingPosToRealPos(island.GetPosition()),Radius=island.islandLoadDistance};
@@ -7776,9 +8614,9 @@ namespace ShipwrightAndTransport.Sailing
                 if (cell.What && described.Add(cell.What))
                     Log.Info("Navigation seabed: "+cell.What.name+" (layer "+LayerMask.LayerToName(cell.What.gameObject.layer)+(cell.What.transform.parent ? ", under "+
                         cell.What.transform.parent.name : "")+") "+(depth>=0 ? depth.ToString("F1")+" m under the sea" : (-depth).ToString("F1")+" m over it")+
-                        " at ("+centre.x.ToString("F0")+", "+centre.z.ToString("F0")+"); her keel needs "+Draft.ToString("F2")+" m.");
+                        " at ("+centre.x.ToString("F0")+", "+centre.z.ToString("F0")+"); its keel needs "+Draft.ToString("F2")+" m.");
                 Obstruction="Shallows: "+(cell.What ? cell.What.name : "the seabed")+" "+(depth>=0 ? depth.ToString("F1")+" m deep" : "above the sea")+
-                    " (her keel needs "+Draft.ToString("F2")+" m)";
+                    " (its keel needs "+Draft.ToString("F2")+" m)";
                 return false;
             }
             return true;
@@ -7914,7 +8752,7 @@ namespace ShipwrightAndTransport.Sailing
             foreach (var island in tracker.islands)
             {
                 if (!island || island.islandIndex<=0) continue;
-                if (island.SceneLoaded() && SceneManager.GetSceneByBuildIndex(island.islandIndex).isLoaded) continue;
+                if (island.SceneLoaded() && IslandScenes.Loaded(island)) continue;
                 if (!islands.TryGetValue(island.islandIndex,out var envelope))
                     envelope=new IslandEnvelope { Centre=FloatingOriginManager.instance.ShiftingPosToRealPos(island.GetPosition()), Radius=island.islandLoadDistance };
                 if (new Vector2(envelope.Centre.x-centre.x,envelope.Centre.z-centre.z).magnitude>reach+envelope.Radius) continue;
@@ -8004,6 +8842,12 @@ namespace ShipwrightAndTransport.Sailing
         internal const float TurnStep=15f;
         internal bool TurnClear(RoutePoint at,double from,double to)
         {
+            long started=System.Diagnostics.Stopwatch.GetTimestamp();
+            try { return TurnClearTimed(at,from,to); }
+            finally { CheckTicks+=System.Diagnostics.Stopwatch.GetTimestamp()-started; }
+        }
+        private bool TurnClearTimed(RoutePoint at,double from,double to)
+        {
             if (!RoutePlanner.Finite(at) || !FloatingOriginManager.instance) return false;
             double turn=NavigationMath.Delta(from,to);
             int steps=(int)Math.Ceiling(Math.Abs(turn)/TurnStep);
@@ -8023,8 +8867,8 @@ namespace ShipwrightAndTransport.Sailing
                     var tip=Voyage.Ahead(at,heading,along);
                     var cell=SeabedCellAt(Seabed.At(tip,SeabedStep),realSea);
                     if (cell.Top<=realSea-Draft) continue;
-                    Obstruction="Shallows under her "+(along>0 ? "bow" : "stern")+" as she turns to "+NavigationMath.Normalize(heading).ToString("F0")+": "+
-                        (cell.What ? cell.What.name : "the seabed")+" "+(realSea-cell.Top).ToString("F1")+" m deep (her keel needs "+Draft.ToString("F2")+" m)";
+                    Obstruction="Shallows under its "+(along>0 ? "bow" : "stern")+" as it turns to "+NavigationMath.Normalize(heading).ToString("F0")+": "+
+                        (cell.What ? cell.What.name : "the seabed")+" "+(realSea-cell.Top).ToString("F1")+" m deep (its keel needs "+Draft.ToString("F2")+" m)";
                     return false;
                 }
             }
@@ -8054,7 +8898,7 @@ namespace ShipwrightAndTransport.Sailing
             for (int i=0;i<count;++i) if (Obstacle(overlaps[i],centre)) return false;
             return true;
         }
-        private bool MovingTrafficClear(RoutePoint from,RoutePoint to,float speed)
+        private bool MovingTrafficClear(RoutePoint from,RoutePoint to,float speed,double heading=double.NaN)
         {
             if (Time.time>=trafficAt)
             {
@@ -8076,22 +8920,79 @@ namespace ShipwrightAndTransport.Sailing
                         bodies.Add(body); customTraffic[body]=controller;
                     }
                 }
+                EconomyTraders.Read(traderTraffic);
+                bodies.AddRange(traderTraffic.Keys);
+                if (traderTraffic.Count>0 && !tradersNoted)
+                {
+                    tradersNoted=true;
+                    Log.Info("Sailing: "+boat.Root.name+"'s moving traffic includes EconomyOverhaul's drawn traders ("+traderTraffic.Count+" now).");
+                }
                 traffic=bodies.Distinct().ToArray();
                 trafficAt=Time.time+2;
+                if (trafficShapes.Count>0) foreach (var gone in trafficShapes.Keys.Where(b => !b || Array.IndexOf(traffic,b)<0).ToList()) trafficShapes.Remove(gone);
             }
             foreach (var body in traffic)
             {
-                if (!body || !body.gameObject.activeInHierarchy || body==boat.Body || body.isKinematic) continue;
+                if (!body || !body.gameObject.activeInHierarchy || body==boat.Body) continue;
+                // A kinematic body's Rigidbody.velocity is not its motion: only a trader's own velocity is known.
+                Vector3 moving;
+                if (traderTraffic.TryGetValue(body,out var trader)) moving=new Vector3(trader.x,0,trader.y);
+                else if (body.isKinematic) continue;
+                else moving=body.velocity;
                 // Under way only (decision 109): a boat lying still is an obstacle Clear sees by its colliders.
-                if (!TrafficPrediction.Moving(body.velocity.x,body.velocity.z)) continue;
+                if (!TrafficPrediction.Moving(moving.x,moving.z)) continue;
                 // A scene can return a boat to its pool between registry refreshes.
                 if (customTraffic.TryGetValue(body,out var controller) && (!controller || !controller.isActiveAndEnabled)) continue;
                 var start=FloatingOriginManager.instance.ShiftingPosToRealPos(body.position);
-                if (TrafficPrediction.Intersects(from,to,speed,new RoutePoint(start.x,start.z),
-                    body.velocity.x,body.velocity.z,Radius+12))
-                { Obstruction="Predicted crossing traffic: "+body.name; return false; }
+                var shape=TrafficHull(body);
+                var axis=body.rotation*(shape.AlongX ? Vector3.right : Vector3.forward);
+                double gap=TrafficPrediction.LeastGap(from,to,speed,NavigationMath.Finite(heading) ? heading : boat.Root.eulerAngles.y,new TrafficPrediction.Hull(ForeExtent,AftExtent,Radius),
+                    new RoutePoint(start.x,start.z),moving.x,moving.z,NavigationMath.Heading(axis.x,axis.z),shape.Hull,out double when);
+                if (TrafficPrediction.Meets(gap,when))
+                {
+                    TrafficWhen=when;
+                    Obstruction="Predicted crossing traffic: "+body.name+" ("+(gap>0 ? "the hulls "+gap.ToString("F1")+" m apart" : "the hulls touching")+" in "+when.ToString("F1")+" s)";
+                    return false;
+                }
             }
             return true;
+        }
+
+        // EconomyOverhaul's drawn traders (VisibleTraders.shown: each Visual's Copy.Body and Velocity, the copy placed), by reflection;
+        // none without that mod. Members it can't find are logged once and nothing is read.
+        private static class EconomyTraders
+        {
+            private static bool looked;
+            private static FieldInfo shown, copy, body, velocity, placed;
+
+            internal static void Read(Dictionary<Rigidbody, Vector2> into)
+            {
+                into.Clear();
+                if (!looked)
+                {
+                    looked=true;
+                    var list=ShipwrightAndTransport.Compat.Mods.TypeNamed("EconomyOverhaul.VisibleTraders");
+                    if (list==null) return;
+                    var visual=AccessTools.Inner(list,"Visual");
+                    shown=AccessTools.Field(list,"shown");
+                    copy=visual!=null ? AccessTools.Field(visual,"Copy") : null;
+                    velocity=visual!=null ? AccessTools.Field(visual,"Velocity") : null;
+                    placed=visual!=null ? AccessTools.Field(visual,"Placed") : null;
+                    body=copy!=null ? AccessTools.Field(copy.FieldType,"Body") : null;
+                    if (shown==null || copy==null || velocity==null || placed==null || body==null || velocity.FieldType!=typeof(Vector2) || body.FieldType!=typeof(Rigidbody))
+                    {
+                        shown=null;
+                        Log.Warn("Sailing: EconomyOverhaul's drawn traders can't be read (VisibleTraders.shown, Visual.Copy, Velocity, Placed, TraderCopy.Body); its traders count only as still obstacles.");
+                    }
+                }
+                if (shown==null || !(shown.GetValue(null) is System.Collections.IDictionary all)) return;
+                foreach (var v in all.Values)
+                {
+                    if (v==null || !(bool)placed.GetValue(v)) continue;
+                    var c=copy.GetValue(v);
+                    if (c!=null && body.GetValue(c) is Rigidbody b && b) into[b]=(Vector2)velocity.GetValue(v);
+                }
+            }
         }
         // The survey below (every collider in the scene and every island's renderers: up to 17.6 ms, 90 times in the 7.5 minutes of run
         // 20261011-203805, every 5 s) runs again only when the loaded scenes have changed (an island's geometry comes and goes with its
@@ -8169,7 +9070,7 @@ namespace ShipwrightAndTransport.Sailing
             if (!Touches(c.gameObject.layer))
             {
                 if (passedThrough.Add(c))
-                    Log.Info("Navigation: "+c.name+" (layer "+LayerMask.LayerToName(c.gameObject.layer)+") is no obstacle: her hull's layers ("+
+                    Log.Info("Navigation: "+c.name+" (layer "+LayerMask.LayerToName(c.gameObject.layer)+") is no obstacle: its hull's layers ("+
                         string.Join(", ",hullLayers.Select(l => LayerMask.LayerToName(l)).ToArray())+") pass through it.");
                 return false;
             }
@@ -8188,7 +9089,7 @@ namespace ShipwrightAndTransport.Sailing
                 string kind=c is MeshCollider mesh ? (mesh.convex ? "convex mesh" : "mesh") : c is BoxCollider ? "box" : c is CapsuleCollider ? "capsule" : c is SphereCollider ? "sphere" : c.GetType().Name;
                 float keel=boat.Root.TransformPoint(new Vector3(0,KeelY,0)).y-sea;
                 Log.Info("Navigation obstruction: "+c.name+" ("+kind+", layer "+LayerMask.LayerToName(c.gameObject.layer)+(c.transform.parent ? ", under "+c.transform.parent.name : "")+
-                    "): met at "+local.ToString("F1")+" in her frame (right, up, ahead), "+(at.y-sea).ToString("F1")+" m against the sea's surface; her keel at "+
+                    "): met at "+local.ToString("F1")+" in its frame (right, up, ahead), "+(at.y-sea).ToString("F1")+" m against the sea's surface; its keel at "+
                     keel.ToString("F1")+" m, the sweep down to "+(-Draft).ToString("F1")+" m; its scale "+c.transform.lossyScale.ToString("F1")+", bounds "+c.bounds+".");
             }
             // Whose collider it is (launch 5: "Cube" blocked her tow for 5 minutes; a name alone didn't tell what it was).
@@ -8390,10 +9291,10 @@ namespace ShipwrightAndTransport.Sailing
         // from CruiseSpeed to NearSpeed; inside Near the speed wanted is the final approach's own (VoyageDocking: her distance / 100
         // m/s, between DockSlowest and NearSpeed). Measured from the berth, not her approach point (run 20261011-032545, Fort Aestrin: the approach
         // point moved in to 29-50 m, and slowing to it brought her there at 2 m/s, which the docking furled to a 0.5 m/s it couldn't
-        // make, and she ran past). Faster than wanted by Over she reefs to half the share, by FarOver to Steerage; slower, her sail
-        // comes back.
+        // make, and she ran past). Faster than wanted, the share times (wanted / speed) squared, never under Steerage; slower, the
+        // sail comes back.
         public const double SlowFrom = 600, Near = 120, NearShare = 0.25, CruiseSpeed = 5, NearSpeed = 1.2, DockSlowest = 0.35,
-            Over = 1.2, FarOver = 1.6, Steerage = 0.1;
+            Steerage = 0.1;
 
         private static void Check(double toBerth)
         {
@@ -8429,6 +9330,8 @@ namespace ShipwrightAndTransport.Sailing
             double half = Math.Min(Math.Abs(turn), 150) / 2 * Math.PI / 180;
             return radius * Math.Tan(half) + LeadLengths * length;
         }
+        // How far on a turn `along` metres ahead begins, its lead `lead` before it; 0 when it should have begun already.
+        public static double TurnStart(double along, double lead) => Math.Max(0, along - lead);
         public static double NarrowSpeed(double clearance, double length)
         {
             if (!(length > 0) || double.IsNaN(clearance)) throw new ArgumentException("Invalid narrow-water sample.");
@@ -8444,6 +9347,8 @@ namespace ShipwrightAndTransport.Sailing
         // cell-to-cell steps from reading as turns (Claude's number).
         public const double AnyTurnAngle = 10;
         public const int TurnWindowChords = 3;
+        // A turn TurnAhead finds `along` metres on (the chord that completes it) begins up to a `chord` sooner: its lead taken from there.
+        public static bool TurnStarts(double along, double chord, double lead) => along - chord <= lead;
         public static bool TurnAhead(IList<RoutePoint> way, double heading, double chord, double look, out double along, out RoutePoint at) =>
             TurnAhead(way, heading, chord, look, out along, out at, out _);
         // The same, and `after`: her way's heading once round the turn (the chord that completes it).
@@ -8501,6 +9406,32 @@ namespace ShipwrightAndTransport.Sailing
             return cut;
         }
 
+        // A cut held for a turn that doesn't fit until the ship is round it: on a line by the distance along it, else by time; stepped
+        // toward the least speed any held turn wants (NextCut). A turn that fits neither starts nor ends it.
+        internal sealed class NarrowHold
+        {
+            internal double Wanted = double.NaN, Along = double.NaN, Until, Cut = 1;
+            // `along`: the ship's distance along its line, NaN off a line; `now`: the game's time.
+            internal bool Holding(double along, double now) =>
+                NavigationMath.Finite(Wanted) && (NavigationMath.Finite(along) && NavigationMath.Finite(Along) ? along < Along : now < Until);
+            internal void Clear() { Wanted = double.NaN; Along = double.NaN; Cut = 1; }
+            // The share now: the held cut stepped, or 1 (cleared) once its turn is passed.
+            internal double Step(double speed, double along, double now)
+            {
+                if (!Holding(along, now)) { Clear(); return 1; }
+                return Cut = NextCut(Cut, speed, Wanted);
+            }
+            // A turn that doesn't fit: held to `endAlong` on the line (NaN off it), else to `endTime`.
+            internal double Hold(double speed, double wanted, double endAlong, double endTime)
+            {
+                bool holding = NavigationMath.Finite(Wanted);
+                Wanted = holding ? Math.Min(Wanted, wanted) : wanted;
+                if (NavigationMath.Finite(endAlong)) Along = Math.Max(holding && NavigationMath.Finite(Along) ? Along : 0, endAlong);
+                else { Along = double.NaN; Until = Math.Max(holding ? Until : 0, endTime); }
+                return Cut = NextCut(Cut, speed, Wanted);
+            }
+        }
+
         // Her sail share's cap this far off the berth at this speed (1 beyond SlowFrom).
         public static double Limit(double toBerth, double speed)
         {
@@ -8508,13 +9439,117 @@ namespace ShipwrightAndTransport.Sailing
             if (toBerth >= SlowFrom) return 1;
             double share = toBerth <= Near ? NearShare : NearShare + (1 - NearShare) * (toBerth - Near) / (SlowFrom - Near);
             double wanted = Speed(toBerth);
-            if (speed > wanted * FarOver) return Math.Min(share, Steerage);
-            if (speed > wanted * Over) return share * 0.5;
+            if (speed > wanted) return Math.Max(Math.Min(share, Steerage), share * NarrowShare(speed, wanted));
             // Slower than wanted, she gets her sail back as she loses way (all of it stopped), so she keeps steerage and can work
             // to windward (the arrival lab, run 20261011-010840: 86 m off at 1.1 m/s, a quarter of her sail).
             if (speed < wanted) return share + (1 - share) * (1 - Math.Max(0, speed) / wanted);
             return share;
         }
+
+        // The final approach's aim: the point on the target's axis (through `target` along `heading`) FinalAimLengths of the ship's
+        // length (FinalAimAheadLeast metres at least, `lead` if longer) ahead of the ship's own place along that axis, at most a length
+        // (FinalAimLeast at least) past the target, so the ship comes onto the axis before it runs in along it.
+        public const double FinalAimLengths = 0.5, FinalAimAheadLeast = 10, FinalAimLeast = 20;
+        public static RoutePoint FinalAim(RoutePoint here, RoutePoint target, double heading, double length, double lead = 0)
+        {
+            if (!NavigationMath.Finite(heading) || !(length > 0)) throw new ArgumentException("Invalid final approach.");
+            double fx = Math.Sin(heading * Math.PI / 180), fz = Math.Cos(heading * Math.PI / 180);
+            double along = (here.x - target.x) * fx + (here.z - target.z) * fz;
+            double ahead = Math.Max(FinalAimAheadLeast, FinalAimLengths * length);
+            if (NavigationMath.Finite(lead)) ahead = Math.Max(ahead, lead);
+            double aim = Math.Min(along + ahead, Math.Max(FinalAimLeast, length));
+            return new RoutePoint((float)(target.x + fx * aim), (float)(target.z + fz * aim));
+        }
+
+        // The game's windage (BoatWind) along `heading` (m/s²): the apparent wind (the true wind `windX`, `windZ` less `speed` along the
+        // heading) times its force per m/s, `front` with that wind ahead or astern rising evenly to `side` abeam, over the hull's `mass`.
+        public static double WindPush(double windX, double windZ, double heading, double speed, double front, double side, double mass)
+        {
+            if (!(mass > 0) || !NavigationMath.Finite(heading) || !NavigationMath.Finite(speed)) return 0;
+            double fx = Math.Sin(heading * Math.PI / 180), fz = Math.Cos(heading * Math.PI / 180);
+            double ax = windX - fx * speed, az = windZ - fz * speed, size = Math.Sqrt(ax * ax + az * az);
+            if (!(size > 1e-6)) return 0;
+            double along = ax * fx + az * fz, angle = Math.Acos(NavigationMath.Clamp(along / size, -1, 1)) * 180 / Math.PI;
+            if (angle > 90) angle = 180 - angle;
+            return along * (front + (side - front) * angle / 90) / mass;
+        }
+
+        // The speed along `heading` at which the forward drag's law (dv/dt = -drag x (v³ + 2v)) matches the windage's push (WindPush),
+        // the sails furled; 0 when the wind holds the hull back or a value is missing.
+        public const double DriftTop = 30;
+        public static double WindDrift(double drag, double windX, double windZ, double heading, double front, double side, double mass)
+        {
+            if (!(drag > 0)) return 0;
+            double Net(double v) => WindPush(windX, windZ, heading, v, front, side, mass) - drag * (v * v * v + 2 * v);
+            if (!(Net(0) > 0)) return 0;
+            if (Net(DriftTop) > 0) return DriftTop;
+            double low = 0, high = DriftTop;
+            for (int i = 0; i < 30; i++) { double mid = (low + high) / 2; if (Net(mid) > 0) low = mid; else high = mid; }
+            return low;
+        }
+
+        // The straight way in's bearing from a ship at `here` on `heading`: it runs `run` metres on while its helm goes over, turns toward
+        // `spot` on a circle of `radius` and leaves the circle on its tangent through the spot (`turnEnd`, where it leaves); with no
+        // radius, the bearing from the end of the run. NaN when the spot lies within the circle.
+        public static double StraightAxis(RoutePoint here, double heading, RoutePoint spot, double radius, double run, out RoutePoint turnEnd)
+        {
+            turnEnd = here;
+            if (!NavigationMath.Finite(heading) || !(run >= 0) || !(radius >= 0)) return double.NaN;
+            double h = heading * Math.PI / 180;
+            var start = new RoutePoint((float)(here.x + Math.Sin(h) * run), (float)(here.z + Math.Cos(h) * run));
+            turnEnd = start;
+            double toSpot = NavigationMath.Heading(spot.x - start.x, spot.z - start.z);
+            if (radius <= 0) return toSpot;
+            int side = NavigationMath.Delta(heading, toSpot) >= 0 ? 1 : -1;
+            double c = (heading + 90 * side) * Math.PI / 180;
+            double cx = start.x + Math.Sin(c) * radius, cz = start.z + Math.Cos(c) * radius;
+            double dx = spot.x - cx, dz = spot.z - cz, d = Math.Sqrt(dx * dx + dz * dz);
+            if (!(d > radius)) return double.NaN;
+            double radial = NavigationMath.Heading(dx, dz) - side * Math.Acos(radius / d) * 180 / Math.PI, r = radial * Math.PI / 180;
+            turnEnd = new RoutePoint((float)(cx + Math.Sin(r) * radius), (float)(cz + Math.Cos(r) * radius));
+            return NavigationMath.Normalize(radial + 90 * side);
+        }
+
+        // Straight to the release spot from where the ship lies (no approach point, no line-up on the berth's axis): within
+        // StraightInWithin metres of it, its way there clear (`clear`), the spot's bearing `apparentOff` degrees off the apparent wind
+        // the ship would feel on that heading, at least its close-hauled angle `closeHauled`, and the short turn from the bow to that
+        // bearing not through the wind's eye (`acrossEye`), which the final approach's steering doesn't make.
+        public const double StraightInWithin = 60;
+        public static bool StraightIn(double distance, bool clear, double apparentOff, double closeHauled, bool acrossEye) =>
+            clear && !acrossEye && NavigationMath.Finite(distance) && NavigationMath.Finite(apparentOff) && NavigationMath.Finite(closeHauled) &&
+            distance <= StraightInWithin && Math.Abs(apparentOff) >= closeHauled;
+
+        // The hold at the spot takes the ship within HoldReach metres of it, its sails furled, at any speed; the final approach's sail
+        // aims to bring it there at HoldSpeed m/s.
+        public const double HoldReach = 10, HoldSpeed = 0.6;
+
+        // Lined up on the final approach's axis: the spot ahead (`along` > 0), the heading within LinedUpDegrees of the axis and the ship
+        // within a beam of it; once lined up (`was`), kept to LinedUpLeaveDegrees and two beams.
+        public const double LinedUpDegrees = 10, LinedUpLeaveDegrees = 20;
+        public static bool LinedUp(double headingOff, double across, double along, double beam, bool was) =>
+            along > 0 && (was ? Math.Abs(headingOff) <= LinedUpLeaveDegrees && Math.Abs(across) <= 2 * beam
+                : Math.Abs(headingOff) <= LinedUpDegrees && Math.Abs(across) <= beam);
+
+        // The fastest speed (m/s) from which the hull runs on at that speed for `reefSeconds` while its sail comes in, then coasts
+        // (HullTurn.CoastDistance with its forward `drag`, times `margin`) down to `endSpeed` within `room` metres; `endSpeed` with no
+        // room; NaN without the drag. Uncapped (CoastTop only bounds the search: the coast's law has a longest coast whatever the speed).
+        public const double CoastTop = 100;
+        public static double CoastSpeed(double room, double endSpeed, double drag, double margin, double reefSeconds)
+        {
+            if (!(drag > 0) || !(margin > 0) || !(reefSeconds >= 0) || !(endSpeed >= 0) || !NavigationMath.Finite(room)) return double.NaN;
+            if (room <= 0) return endSpeed;
+            double Run(double v) => v * reefSeconds + HullTurn.CoastDistance(v, endSpeed, drag) * margin;
+            if (Run(CoastTop) <= room) return CoastTop;
+            double low = endSpeed, high = CoastTop;
+            for (int i = 0; i < 24; i++) { double mid = (low + high) / 2; if (Run(mid) <= room) low = mid; else high = mid; }
+            return low;
+        }
+
+        // A final approach that makes no way: more than PinnedFrom metres from its target, and less than PinnedProgress metres nearer it
+        // than PinnedSeconds ago.
+        public const double PinnedFrom = 10, PinnedProgress = 1, PinnedSeconds = 20;
+        public static bool Pinned(double distance, double distanceThen, double seconds) =>
+            distance > PinnedFrom && seconds >= PinnedSeconds && distanceThen - distance < PinnedProgress;
     }
 
     // ==== Backing ====
@@ -8570,15 +9605,18 @@ namespace ShipwrightAndTransport.Sailing
         // guide point (`bearing`; TackNavigator.Vmg); NaN when none makes way. Only turns beyond DoneWithin: a nearer target ended
         // the backing as it began, "on her heading", and she was blocked and backed again (run 20261011-233600 on FE: five backings in
         // 5 s, each 1 m astern, the Cog's targets 19 degrees off); a turn that small her helm makes going ahead.
-        internal static double Target(double heading, int side, double bearing, double apparentFrom, double noGo, Func<double, bool> clear, double margin = TackNavigator.CloseMargin)
+        // `wind`: each heading's apparent wind once the ship sails it (HeadingWind); without the true wind in it, the apparent wind now.
+        internal static double Target(double heading, int side, double bearing, double apparentFrom, double noGo, Func<double, bool> clear, double margin = TackNavigator.CloseMargin,
+            HeadingWind wind = default)
         {
-            if (side != 1 && side != -1) throw new ArgumentException("She turns to one side.", nameof(side));
+            if (side != 1 && side != -1) throw new ArgumentException("It turns to one side.", nameof(side));
+            if (!wind.Known) wind = HeadingWind.ApparentOnly(apparentFrom);
             double best = double.NaN, bestWay = TackNavigator.LeastWay;
             for (double t = DoneWithin + Step; t <= MostTurn + 1e-9; t += Step)
             {
                 double h = NavigationMath.Normalize(heading + side * t);
-                if (Math.Abs(NavigationMath.Delta(apparentFrom, h)) < TackNavigator.BeatOff(noGo, margin) || !clear(h)) continue;
-                double way = TackNavigator.Vmg(h, bearing, apparentFrom, noGo);
+                if (Math.Abs(wind.Off(h)) < TackNavigator.BeatOff(noGo, margin) || !clear(h)) continue;
+                double way = TackNavigator.Vmg(h, bearing, wind, noGo);
                 if (way > bestWay + 1e-9) { best = h; bestWay = way; }
             }
             return best;
@@ -8778,41 +9816,6 @@ namespace ShipwrightAndTransport.Sailing
         }
     }
 
-    // ==== HelmHold ====
-
-    // Decision 132 (the user, 2026-10-10 night: "once the direction is right, let go of helm, vanilla's rudder push back will
-    // automatically make ship stay in course ... only resume helm control if you stray away from your direction too much"): when she
-    // lets go of the helm and when she takes it again. Engine-free, so the rule is host-tested; Voyage.UpdateHelmHold runs it.
-
-    internal enum HelmChange { None, LetGo, Take }
-
-    internal static class HelmHold
-    {
-        // She lets go within LetGoWithin degrees of her course, turning under LetGoYawRate degrees a second, with more than LetGoSpeed
-        // m/s ahead (the game's push back grows with her speed); she takes the helm again beyond TakeHelmBeyond, or off a plain
-        // course (a turn, bearing away, in irons, giving way, the harbour's stages), or under LetGoSpeed. Claude's numbers, to tune.
-        internal const double LetGoWithin = 5, TakeHelmBeyond = 15, LetGoSpeed = 1, LetGoYawRate = 2;
-        // Let go, she takes the helm again at once once she turns faster than this, whatever her course's error (run 20261013-020142,
-        // GA's arrival lab: back from the clock 2.7 km off Dragon Cliffs in a grown sea, the Dhow let go at once, on her course, her turn
-        // zeroed by the return; she slewed round at 25 degrees a second with her helm centred, and the helm came back only 15 degrees
-        // off, too late: she was round 85 degrees in 2 s, lost her way and lay in irons for 10 minutes).
-        internal const double TakeHelmYawRate = 6;
-        // Decision 134: she lets go only of a light helm (under LightHelm of full); a heavier one on her course is a weather helm the
-        // game's rudder wouldn't hold, which reefs instead (the balance, decision 128).
-        internal const double LightHelm = 0.5;
-
-        // `plain`: on a plain course (sailing at her guide point or close-hauled, gathering way included); `helm`: her helm now, a
-        // share of full.
-        internal static HelmChange Next(bool released, bool plain, double error, double yawRate, double forward, double helm)
-        {
-            if (!NavigationMath.Finite(error) || !NavigationMath.Finite(yawRate) || !NavigationMath.Finite(forward) || !NavigationMath.Finite(helm))
-                throw new ArgumentException("Non-finite helm sample.");
-            bool free = plain && forward > LetGoSpeed;
-            if (released) return !free || Math.Abs(error) > TakeHelmBeyond || Math.Abs(yawRate) > TakeHelmYawRate ? HelmChange.Take : HelmChange.None;
-            return free && Math.Abs(error) < LetGoWithin && Math.Abs(yawRate) < LetGoYawRate && Math.Abs(helm) < LightHelm ? HelmChange.LetGo : HelmChange.None;
-        }
-    }
-
     // ==== LinePlanner ====
 
     // Decision 198 (b) (the user, 2026-10-12: "it should know that there is a turn coming and she need to judge if she can make that turn,
@@ -8832,6 +9835,31 @@ namespace ShipwrightAndTransport.Sailing
         internal RoutePoint Point => new RoutePoint(X, Z);
     }
 
+    // A line's stretch the ship can't sail in the wind: its heading within the ship's close-hauled off the true wind where the water is too
+    // narrow to tack in, longer than the ship.
+    internal static class LineJudge
+    {
+        // From `from` metres along on, the first stretch whose points head within `closeHauled` degrees of the true wind (from `windFrom`)
+        // with under `narrow` metres of clearance, points under `length` apart taken as one stretch, longer than `length`: its start and
+        // end (metres along). False when none.
+        internal static bool Unsailable(IList<LinePoint> line, double from, double windFrom, double closeHauled, double narrow, double length, out double start, out double end)
+        {
+            start = end = double.NaN;
+            double runFrom = double.NaN, runTo = double.NaN;
+            for (int k = 0; k < line.Count; k++)
+            {
+                var q = line[k];
+                if (q.Along < from || Math.Abs(NavigationMath.Delta(windFrom, q.Heading)) >= closeHauled || q.Clearance >= narrow) continue;
+                if (!double.IsNaN(runFrom) && q.Along - runTo <= length) { runTo = q.Along; continue; }
+                if (!double.IsNaN(runFrom) && runTo - runFrom > length) break;
+                runFrom = runTo = q.Along;
+            }
+            if (double.IsNaN(runFrom) || runTo - runFrom <= length) return false;
+            start = runFrom; end = runTo;
+            return true;
+        }
+    }
+
     // Decision 198 (h): where her line in ends: within Radius of At (her approach point, decision 146), her heading within Tolerance of
     // Heading there (her way in along her berth; NaN: any heading).
     internal sealed class LineGoal
@@ -8849,6 +9877,9 @@ namespace ShipwrightAndTransport.Sailing
 
     internal sealed class LinePlanner
     {
+        // The clearance a heading in the no-go wants (a beat or a tack): the chart's narrow clearance, else half of 3 lengths or 60 m.
+        internal static double TackRoom(double narrowClearance, double length) => narrowClearance > 0 ? narrowClearance : Math.Max(3 * length, 60) / 2;
+
         // Each move of the search: StepLength metres straight, or on an arc of her planned circle, or of twice it. States are told
         // apart by PositionCell metres and HeadingBin degrees, the cheaper kept. HeadingBin 2.5 (was 5, 2026-10-12, building 198 h): an
         // 80 m circle turns 4.3 degrees a step, so a 5-degree bin merged her tightest arc into a less turned state of the same cost and a
@@ -8881,6 +9912,9 @@ namespace ShipwrightAndTransport.Sailing
         }
         // A turn costs ArcCost more a metre than a straight; a tack through the wind's eye TackLengths of her length more.
         internal const double ArcCost = 0.05, TackLengths = 2;
+        // On a way in, a straight move whose hull point is short of the full room passes with twice the half-beam and TurnSpareLeast;
+        // such a move costs SqueezeCost times as much, so a wider way is taken where there is one. Turns keep the full room.
+        internal const double SqueezeCost = 2;
         // Done at the chart's edge (the open sea it was flooded from) or in water OpenClearance clear.
         internal const double OpenClearance = 300;
         internal const int MostStates = 250000;
@@ -8905,7 +9939,7 @@ namespace ShipwrightAndTransport.Sailing
         private readonly WaterField chart;
         private readonly double length, halfBeam, radiusToward, radiusAway, spare;
         private readonly double windFrom, beat, tackRoom;
-        private readonly bool windKnown;
+        private readonly bool windKnown, wears;
         // Decision 198 (h): her way in ends at her goal, within her chart (its edge is no way out); null: her way out to the open sea.
         private readonly LineGoal goal;
         internal LineGoal Goal => goal;
@@ -8940,14 +9974,16 @@ namespace ShipwrightAndTransport.Sailing
         // `radiusToward`, `radiusAway`: her planned circle turning toward the wind and away from it (TurnCircle.Plan). `windFromNow`,
         // `beatNow`: the true wind she has and her beat off it, when the chart was flooded for another (else the chart's). `goal`: her
         // way in (decision 198 h), on a chart flooded from it (WaterField.FloodToBegin).
+        // `wears`: a hull that changes sides by wearing makes no tack on its line.
         internal LinePlanner(WaterField chart, RoutePoint start, double heading, double length, double halfBeam, double radiusToward, double radiusAway,
-            double windFromNow = double.NaN, double beatNow = double.NaN, LineGoal goal = null)
+            double windFromNow = double.NaN, double beatNow = double.NaN, LineGoal goal = null, bool wears = false)
         {
-            if (chart == null || !chart.Flooded) throw new ArgumentException("Her line needs her flooded chart.", nameof(chart));
+            if (chart == null || !chart.Flooded) throw new ArgumentException("Its line needs its flooded chart.", nameof(chart));
             if (!(length > 0) || !(halfBeam > 0) || !(radiusToward > 0) || !(radiusAway > 0) || !RoutePlanner.Finite(start) || !NavigationMath.Finite(heading))
                 throw new ArgumentException("Invalid line search.");
-            if (goal != null && !chart.HasGoal) throw new ArgumentException("Her line in needs her chart flooded from her goal.", nameof(goal));
+            if (goal != null && !chart.HasGoal) throw new ArgumentException("Its line in needs its chart flooded from its goal.", nameof(goal));
             this.chart = chart; this.length = length; this.halfBeam = halfBeam; this.radiusToward = radiusToward; this.radiusAway = radiusAway; this.goal = goal;
+            this.wears = wears;
             spare = SpareFor(length);
             double tightestTurn = StepLength / Math.Min(radiusToward, radiusAway) * 180 / Math.PI;
             headingBins = Math.Max(1, (long)Math.Floor(360 / Math.Max(HeadingBin, tightestTurn / 2)));
@@ -8956,10 +9992,10 @@ namespace ShipwrightAndTransport.Sailing
             windFrom = now ? NavigationMath.Normalize(windFromNow) : chart.WindFrom; windKnown = NavigationMath.Finite(windFrom);
             beat = !windKnown ? 0 : now ? beatNow : chart.WindBeat;
             // Too narrow to tack in (decision 174): under 3 of her lengths or 60 m wide, as the chart counted it.
-            tackRoom = !windKnown ? 0 : chart.NarrowClearance > 0 ? chart.NarrowClearance : Math.Max(3 * length, 60) / 2;
+            tackRoom = !windKnown ? 0 : TackRoom(chart.NarrowClearance, length);
             axis = Axis(length, halfBeam);
             int startCell = chart.IndexOf(start);
-            if (startCell < 0 || !NavigationMath.Finite(chart.DistanceAt(chart.Start(start)))) { Fail("she is not in her chart's water"); return; }
+            if (startCell < 0 || !NavigationMath.Finite(chart.DistanceAt(chart.Start(start)))) { Fail("it is not in its chart's water"); return; }
             // The room she has where she starts: the least, over her hull's points, of their distance from the middle of a cell her hull
             // doesn't fit (bounded below by their cells' clearance, OctileMost aside, less their offset from its middle).
             double h0 = NavigationMath.Normalize(heading) * Math.PI / 180, have = double.PositiveInfinity;
@@ -8997,7 +10033,7 @@ namespace ShipwrightAndTransport.Sailing
                 Expand(n, index);
             }
             Milliseconds += clock.Elapsed.TotalMilliseconds;
-            Fail("no line her circle and spare allow (" + closed.Count + " states)");
+            Fail("no line its circle and spare allow (" + closed.Count + " states)");
             return true;
         }
 
@@ -9016,10 +10052,10 @@ namespace ShipwrightAndTransport.Sailing
                     bool toward = windKnown && Math.Sign(rel) == turn;
                     radius = (toward ? radiusToward : radiusAway) * (tight ? 1 : 2);
                 }
-                if (!Move(n, turn, radius, spare, out var next, out bool tack)) continue;
+                if (!Move(n, turn, radius, spare, out var next, out bool tack, out bool squeezed)) continue;
                 int cell = chart.IndexOf(new RoutePoint((float)next.X, (float)next.Z));
                 double factor = cell < 0 ? 1 : chart.StepFactor(cell, next.H);
-                next.G = n.G + next.Step * factor * (turn == 0 ? 1 : 1 + ArcCost) + (tack ? TackLengths * length : 0);
+                next.G = n.G + next.Step * factor * (turn == 0 ? 1 : 1 + ArcCost) * (squeezed ? SqueezeCost : 1) + (tack ? TackLengths * length : 0);
                 next.Parent = index; next.Turn = turn;
                 Add(next);
             }
@@ -9027,9 +10063,9 @@ namespace ShipwrightAndTransport.Sailing
 
         // One move from `n`: its end, when every point her hull passes is in water (her spare `need` in a turn), and whether it takes
         // her through the wind's eye (a tack: only where the water is wide enough to tack in). `refused`: told why not (ExplainStart).
-        private bool Move(Node n, int turn, double radius, double need, out Node next, out bool tack, Action<string> refused = null)
+        private bool Move(Node n, int turn, double radius, double need, out Node next, out bool tack, out bool squeezed, Action<string> refused = null)
         {
-            next = n; tack = false;
+            next = n; tack = false; squeezed = false;
             double h0 = n.H * Math.PI / 180, k = turn == 0 ? 0 : turn / radius, step = StepAt(n.X, n.Z);
             next.Step = step;
             for (int s = 1; s <= 3; s++)
@@ -9041,14 +10077,22 @@ namespace ShipwrightAndTransport.Sailing
                 // Her first length off her start: only her middle in water; then her room grows from what she had to all of it.
                 if (travelled < length)
                 {
-                    if (!Water(x, z, 0, refused)) { refused?.Invoke("her middle " + d.ToString("F1") + " m on (her first length)"); return false; }
+                    if (!Water(x, z, 0, refused)) { refused?.Invoke("its middle " + d.ToString("F1") + " m on (its first length)"); return false; }
                 }
                 else
                 {
                     double full = 2 * halfBeam + need, want = Math.Min(full, startHave + (full - startHave) * Math.Min(1, (travelled - length) / (StartRampLengths * length)));
+                    double least = goal != null && turn == 0 ? Math.Min(want, 2 * halfBeam + TurnSpareLeast) : want;
                     foreach (double a in axis)
-                        if (!Water(x + a * Math.Sin(h), z + a * Math.Cos(h), want, refused))
-                        { refused?.Invoke("her point " + a.ToString("F1") + " m along her, " + d.ToString("F1") + " m on, wanting " + want.ToString("F1") + " m of room"); return false; }
+                    {
+                        double px = x + a * Math.Sin(h), pz = z + a * Math.Cos(h);
+                        if (Water(px, pz, want)) continue;
+                        if (least < want && Water(px, pz, least)) { squeezed = true; continue; }
+                        if (refused == null) return false;
+                        Water(px, pz, least, refused);
+                        refused("its point " + a.ToString("F1") + " m along it, " + d.ToString("F1") + " m on, wanting " + least.ToString("F1") + " m of room");
+                        return false;
+                    }
                 }
                 next.X = x; next.Z = z; next.H = NavigationMath.Normalize(h * 180 / Math.PI); next.Travelled = travelled;
             }
@@ -9060,11 +10104,12 @@ namespace ShipwrightAndTransport.Sailing
             bool inNoGo = Math.Abs(after) < beat;
             tack = Math.Abs(before) < 90 && Math.Abs(after) < 90 && Math.Sign(before) != Math.Sign(after) && before != 0;
             if (!inNoGo && !tack) return true;
+            if (tack && wears) { refused?.Invoke("a tack, which this hull doesn't make: it wears to change sides"); return false; }
             if (!tack && turn != 0 && Math.Abs(after) > Math.Abs(before)) return true;
             int cell = chart.IndexOf(new RoutePoint((float)next.X, (float)next.Z));
             if (cell < 0 || chart.ClearanceAt(cell) >= tackRoom) return true;
-            refused?.Invoke((tack ? "a tack" : "a heading in her no-go (" + Math.Abs(after).ToString("F0") + " degrees off the wind, her beat " + beat.ToString("F0") + ")") +
-                " where the water is " + chart.ClearanceAt(cell).ToString("F0") + " m clear, under the " + tackRoom.ToString("F0") + " m she needs to tack in");
+            refused?.Invoke((tack ? "a tack" : "a heading in its no-go (" + Math.Abs(after).ToString("F0") + " degrees off the wind, its beat " + beat.ToString("F0") + ")") +
+                " where the water is " + chart.ClearanceAt(cell).ToString("F0") + " m clear, under the " + tackRoom.ToString("F0") + " m it needs to tack in");
             return false;
         }
 
@@ -9119,13 +10164,13 @@ namespace ShipwrightAndTransport.Sailing
                 double hg = goal.Heading * Math.PI / 180, full = 2 * halfBeam + spare;
                 var refusals = new List<string>();
                 foreach (double a in axis)
-                    Water(goal.At.x + a * Math.Sin(hg), goal.At.z + a * Math.Cos(hg), full, w => refusals.Add("her point " + a.ToString("F1") + " m along her: " + w));
-                fit = "; her hull at her goal along its way, " + full.ToString("F1") + " m of room at each point: " + (refusals.Count == 0 ? "fits" : "doesn't fit (" + string.Join("; ", refusals.ToArray()) + ")");
+                    Water(goal.At.x + a * Math.Sin(hg), goal.At.z + a * Math.Cos(hg), full, w => refusals.Add("its point " + a.ToString("F1") + " m along it: " + w));
+                fit = "; its hull at its goal along its way, " + full.ToString("F1") + " m of room at each point: " + (refusals.Count == 0 ? "fits" : "doesn't fit (" + string.Join("; ", refusals.ToArray()) + ")");
             }
-            return nodes.Count + " states; nearest her goal by water (" + m.X.ToString("F0") + ", " + m.Z.ToString("F0") + ") heading " + m.H.ToString("F0") + ", " +
+            return nodes.Count + " states; nearest its goal by water (" + m.X.ToString("F0") + ", " + m.Z.ToString("F0") + ") heading " + m.H.ToString("F0") + ", " +
                 least.ToString("F0") + " m by water from it, " + m.Travelled.ToString("F0") + " m sailed" +
-                (goal == null ? "" : "; " + close + " states within 30 m of her goal" + (close > 0 ? ", their headings " + lowH.ToString("F0") + " to " + highH.ToString("F0") +
-                " off her goal's way (the nearest " + bestOff.ToString("F0") + ", " + goal.Tolerance.ToString("F0") + " allowed)" : "")) + fit;
+                (goal == null ? "" : "; " + close + " states within 30 m of its goal" + (close > 0 ? ", their headings " + lowH.ToString("F0") + " to " + highH.ToString("F0") +
+                " off its goal's way (the nearest " + bestOff.ToString("F0") + ", " + goal.Tolerance.ToString("F0") + " allowed)" : "")) + fit;
         }
 
         // Host diagnostics (the harbour check's --why): her start, and each of her five first moves and why it was refused if it was.
@@ -9135,13 +10180,13 @@ namespace ShipwrightAndTransport.Sailing
             if (nodes.Count == 0) { report.Add("no start: " + Why); return report; }
             var n = nodes[0];
             int cell = chart.IndexOf(new RoutePoint((float)n.X, (float)n.Z));
-            report.Add("her start (" + n.X.ToString("F1") + ", " + n.Z.ToString("F1") + ") heading " + n.H.ToString("F0") + ": its cell " +
-                (cell < 0 ? "off her chart" : (chart.Water(cell) ? "water" : "one her hull doesn't fit") + ", " + chart.ClearanceAt(cell).ToString("F0") + " m clear, " +
-                chart.DistanceAt(cell).ToString("F0") + " m by water to the open sea") + "; her room there " + startHave.ToString("F1") + " m; the wind from " +
-                (windKnown ? windFrom.ToString("F0") + ", her beat " + beat.ToString("F0") + ", her heading " + Math.Abs(NavigationMath.Delta(windFrom, n.H)).ToString("F0") +
-                " off it, " + tackRoom.ToString("F0") + " m of water to tack in" : "not counted") + "; her circle " + radiusToward.ToString("F0") + " m toward the wind, " +
-                radiusAway.ToString("F0") + " away; her spare " + spare.ToString("F1") + " m");
-            string[] names = { "straight", "her circle to starboard", "her circle to port", "twice her circle to starboard", "twice her circle to port" };
+            report.Add("its start (" + n.X.ToString("F1") + ", " + n.Z.ToString("F1") + ") heading " + n.H.ToString("F0") + ": its cell " +
+                (cell < 0 ? "off its chart" : (chart.Water(cell) ? "water" : "one its hull doesn't fit") + ", " + chart.ClearanceAt(cell).ToString("F0") + " m clear, " +
+                chart.DistanceAt(cell).ToString("F0") + " m by water to the open sea") + "; its room there " + startHave.ToString("F1") + " m; the wind from " +
+                (windKnown ? windFrom.ToString("F0") + ", its beat " + beat.ToString("F0") + ", its heading " + Math.Abs(NavigationMath.Delta(windFrom, n.H)).ToString("F0") +
+                " off it, " + tackRoom.ToString("F0") + " m of water to tack in" : "not counted") + "; its circle " + radiusToward.ToString("F0") + " m toward the wind, " +
+                radiusAway.ToString("F0") + " away; its spare " + spare.ToString("F1") + " m");
+            string[] names = { "straight", "its circle to starboard", "its circle to port", "twice its circle to starboard", "twice its circle to port" };
             for (int move = 0; move < 5; move++)
             {
                 int turn = move == 0 ? 0 : move % 2 == 1 ? 1 : -1;
@@ -9152,11 +10197,11 @@ namespace ShipwrightAndTransport.Sailing
                     radius = (windKnown && Math.Sign(rel) == turn ? radiusToward : radiusAway) * (move == 1 || move == 2 ? 1 : 2);
                 }
                 var why = new List<string>();
-                if (!Move(n, turn, radius, spare, out var next, out _, w => why.Add(w))) { report.Add(names[move] + ": refused, " + string.Join("; ", why.ToArray())); continue; }
+                if (!Move(n, turn, radius, spare, out var next, out _, out _, w => why.Add(w))) { report.Add(names[move] + ": refused, " + string.Join("; ", why.ToArray())); continue; }
                 int to = chart.IndexOf(new RoutePoint((float)next.X, (float)next.Z));
                 double distance = to < 0 ? 0 : chart.DistanceAt(chart.Start(new RoutePoint((float)next.X, (float)next.Z)));
                 report.Add(names[move] + ": " + (NavigationMath.Finite(distance) ? "taken, to (" + next.X.ToString("F1") + ", " + next.Z.ToString("F1") + ") heading " + next.H.ToString("F0")
-                    : "dropped: her chart's flood doesn't reach where it ends"));
+                    : "dropped: its chart's flood doesn't reach where it ends"));
             }
             return report;
         }
@@ -9173,8 +10218,8 @@ namespace ShipwrightAndTransport.Sailing
         {
             var p = new RoutePoint((float)x, (float)z);
             int cell = chart.IndexOf(p);
-            if (cell < 0) { if (goal != null) refused?.Invoke("off her chart on her way in"); return goal == null; }
-            if (!chart.Water(cell)) { refused?.Invoke("at (" + x.ToString("F1") + ", " + z.ToString("F1") + ") a cell her hull doesn't fit"); return false; }
+            if (cell < 0) { if (goal != null) refused?.Invoke("off its chart on its way in"); return goal == null; }
+            if (!chart.Water(cell)) { refused?.Invoke("at (" + x.ToString("F1") + ", " + z.ToString("F1") + ") a cell its hull doesn't fit"); return false; }
             if (want <= 0) return true;
             double clearance = chart.ClearanceAt(cell), off = RoutePoint.Distance(p, chart.Centre(cell));
             if (clearance / OctileMost - off >= want) return true;
@@ -9188,7 +10233,7 @@ namespace ShipwrightAndTransport.Sailing
                     int j = cz * chart.Width + cx;
                     if (!chart.Water(j) && RoutePoint.Distance(p, chart.Centre(j)) < want)
                     {
-                        refused?.Invoke("at (" + x.ToString("F1") + ", " + z.ToString("F1") + ") a cell her hull doesn't fit " + RoutePoint.Distance(p, chart.Centre(j)).ToString("F1") + " m off");
+                        refused?.Invoke("at (" + x.ToString("F1") + ", " + z.ToString("F1") + ") a cell its hull doesn't fit " + RoutePoint.Distance(p, chart.Centre(j)).ToString("F1") + " m off");
                         return false;
                     }
                 }
@@ -9341,34 +10386,97 @@ namespace ShipwrightAndTransport.Sailing
         // up to close-hauled at 3-7 degrees a second built a hold of about +0.13 within HoldBand; she overshot 3 degrees into her
         // dead zone and that hold cancelled most of the helm bearing her off (-0.05 for 0.18), and she stalled from 2.1 to 0.8 m/s).
         public const double HoldSteadyRate = 1, HoldUnwind = 0.2;
-        private double last, hold;
-        public void Reset() { last = 0; hold = 0; FullRateSide = 0; }
-        // Decision 225 (5): taken back from where her wheel lies (`helm`, -1 to 1 in this controller's sense), not from the middle,
-        // which left her almost no helm for up to 2 s at its slew.
-        public void Reset(double helm) { Reset(); if (NavigationMath.Finite(helm)) last = NavigationMath.Clamp(helm, -1, 1); }
-        // Decision 225 (10): the side (+1 starboard, -1 port) she was last asked to turn at the most rate she may (mostRate), else 0:
-        // her turning circle is sampled then (TurnCircle), not by the helm's size.
-        public int FullRateSide { get; private set; }
+        private double last, hold, scale = 1;
+        public void Reset() { last = 0; hold = 0; }
+        // RateGain and HoldGain are this law for a hull that turns ReferenceRate degrees a second for full helm: LoopGain degrees a second
+        // of turn got for each degree a second lacking. A hull's own rate (`response`, Unity's turn for full helm at its speed: HullTurn)
+        // scales both, within ScaleLeast to ScaleMost (bounds against a reading far off, not a limit in use: a weak rudder at low speed
+        // gets the full helm its turn needs).
+        public const double LoopGain = 1.5, ReferenceRate = LoopGain / RateGain, ScaleLeast = 0.05, ScaleMost = 50;
+        // The turn the helm asks for: `mostRate` at most, and no more than `share` of the hull's own turn for full helm (`response`, degrees
+        // a second), at least AskedLeast; `mostRate` where the response isn't known.
+        public const double AskedLeast = 1;
+        public static double AskedRateMost(double mostRate, double response, double share) =>
+            response > 0 && share > 0 ? Math.Min(mostRate, Math.Max(AskedLeast, share * response)) : mostRate;
+        // The helm this law gives while the bow turns under 1 degree a second toward a course TurnRateMost / TurnRateGain degrees or more
+        // off, at the last tick's scale: HardOver for the reference hull, less for a hull that turns faster.
+        public double HardOverNow => Math.Min(1, RateGain * scale * (TurnRateMost - 1));
         // Vanilla Rudder applies negative yaw for positive rudder angle while moving forward: a negative demand turns her to starboard.
-        public double Tick(double heading, double target, double yawDegreesPerSecond, double dt, double mostRate = TurnRateMost)
+        // `feedForward`: the helm that cancels the sails' turning push (SailControlAdapters.HelmNeeded, + to port); `response`: the
+        // hull's turn rate for full helm at its speed now (degrees a second; NaN: ReferenceRate).
+        public double Tick(double heading, double target, double yawDegreesPerSecond, double dt, double mostRate = TurnRateMost, double feedForward = 0, double response = double.NaN)
         {
-            if (!NavigationMath.Finite(heading) || !NavigationMath.Finite(target) ||
-                !NavigationMath.Finite(yawDegreesPerSecond) || !NavigationMath.Finite(dt) || dt <= 0 || !NavigationMath.Finite(mostRate) || mostRate <= 0)
+            if (!NavigationMath.Finite(heading) || !NavigationMath.Finite(target) || !NavigationMath.Finite(yawDegreesPerSecond) || !NavigationMath.Finite(dt) || dt <= 0 ||
+                !NavigationMath.Finite(mostRate) || mostRate <= 0 || !NavigationMath.Finite(feedForward))
                 throw new ArgumentException("Invalid heading sample.");
             double error = NavigationMath.Delta(heading, target);
             double wanted = NavigationMath.Clamp(TurnRateGain * error, -mostRate, mostRate);
-            FullRateSide = Math.Abs(TurnRateGain * error) >= mostRate ? Math.Sign(error) : 0;
+            scale = response > 0 ? NavigationMath.Clamp(ReferenceRate / response, ScaleLeast, ScaleMost) : 1;
+            double correction = -RateGain * scale * (wanted - yawDegreesPerSecond);
             if (Math.Abs(error) >= HoldBand) hold = NavigationMath.Move(hold, 0, HoldDecay * dt);
             else
             {
-                if (Math.Abs(yawDegreesPerSecond) < HoldSteadyRate) hold = NavigationMath.Clamp(hold - HoldGain * error * dt, -HoldMost, HoldMost);
+                // No further build while the helm is already at its limit the way the hold would push it.
+                double total = feedForward + correction + hold;
+                bool atLimit = Math.Abs(total) >= 1 && Math.Sign(total) == -Math.Sign(error);
+                if (Math.Abs(yawDegreesPerSecond) < HoldSteadyRate && !atLimit) hold = NavigationMath.Clamp(hold - HoldGain * scale * error * dt, -HoldMost, HoldMost);
                 // Her correction is -error's way: a hold of error's sign pushes her off her course.
                 if (hold * error > 0) hold = NavigationMath.Move(hold, 0, HoldUnwind * dt);
             }
-            var demand = NavigationMath.Clamp(-RateGain * (wanted - yawDegreesPerSecond) + hold, -1, 1);
+            var demand = NavigationMath.Clamp(feedForward + correction + hold, -1, 1);
             last = NavigationMath.Move(last, demand, Slew * dt);
             return last;
         }
+    }
+
+    // Unity's turn of a hull: the rudder's torque (RudderModel.Strength x the rudder's angle in degrees, N·m) over the body's angular drag
+    // times its inertia about the vertical gives the steady turn (rad/s), Rigidbody.angularDrag damping the turn that much each second.
+    internal static class HullTurn
+    {
+        // The steady turn for full helm (degrees a second); NaN when a value is missing.
+        internal static double FullHelmRate(double strength, double fullAngle, double angularDrag, double yawInertia) =>
+            strength > 0 && fullAngle > 0 && angularDrag > 0 && yawInertia > 0 ? strength * fullAngle / (angularDrag * yawInertia) * (180 / Math.PI) : double.NaN;
+
+        internal static double YawInertia(Rigidbody body) => body ? YawInertia(body.inertiaTensor, body.inertiaTensorRotation, body.rotation) : double.NaN;
+
+        // The distance (m) a hull coasts from `from` to `to` m/s with no sail under Crest's forward drag as HullDrag sets it, dv/dt =
+        // -dragForward x (v^3 + 2v): the integral of dv / (dragForward (v^2 + 2)). NaN when a value is missing; 0 when already slower.
+        internal static double CoastDistance(double from, double to, double dragForward)
+        {
+            if (!(dragForward > 0) || !(to >= 0) || !NavigationMath.Finite(from)) return double.NaN;
+            if (from <= to) return 0;
+            return (Math.Atan(from / Math.Sqrt(2)) - Math.Atan(to / Math.Sqrt(2))) / (dragForward * Math.Sqrt(2));
+        }
+
+        // The circle (m) at full helm with no sail's push, whatever the speed (the rudder's torque grows with it as the turn's): angular drag
+        // x inertia over the rudder's power x its full angle (degrees). NaN when a value is missing.
+        internal static double Circle(double angularDrag, double yawInertia, double rudderPower, double fullAngle) =>
+            angularDrag > 0 && yawInertia > 0 && rudderPower > 0 && fullAngle > 0 ? angularDrag * yawInertia / (rudderPower * fullAngle) : double.NaN;
+
+        // The inertia about the world's vertical: the principal moments along the axes the body's rotation and its tensor's rotation turn.
+        internal static double YawInertia(Vector3 tensor, Quaternion tensorRotation, Quaternion rotation)
+        {
+            var r = rotation * tensorRotation;
+            double a = (r * Vector3.right).y, b = (r * Vector3.up).y, c = (r * Vector3.forward).y;
+            return tensor.x * a * a + tensor.y * b * b + tensor.z * c * c;
+        }
+    }
+
+    // The close-hauled margin a voyage has earned: twice the bow's average error on a steady course, averaged over Window seconds of steady
+    // sailing, at least Least and at most Most degrees, at sea and in port; Start until it is measured.
+    internal sealed class SteeringScatter
+    {
+        internal const double Window = 30, Least = 2, Most = 8, Start = TackNavigator.CloseMargin;
+        private double mean = Start / 2;
+
+        // The bow's error off a steady course (degrees) for `dt` seconds.
+        internal void Sample(double error, double dt)
+        {
+            if (!(dt > 0) || !NavigationMath.Finite(error)) return;
+            mean += (Math.Abs(error) - mean) * Math.Min(1, dt / Window);
+        }
+
+        internal double Margin => NavigationMath.Clamp(2 * mean, Least, Most);
     }
 
     // ==== ReleaseSpots ====
@@ -9836,10 +10944,9 @@ namespace ShipwrightAndTransport.Sailing
         // course closer to the wind than that is straight at a guide point, nor a heading she gathers way on. Nearing a stop (Footing, decision 166) she
         // sails up to FootingMargin further off the wind, so she builds speed before she points high (run 20261010-160852: back in
         // physics at 2.5 m/s, the Dhow pointed up at once and her lateen pinned her head to wind at 0.7 m/s).
-        // Decision 177 (the user, 2026-10-11 night): at sea close-hauled is her dead zone and CloseMargin (was 7); in port, where her dead
-        // zone is the angle at which her sails catch 0.5 of the wind, close-hauled is her dead zone itself (PortCloseMargin). Each
-        // ship's own Margin, set by her voyage.
-        public const double CloseMargin = 5, PortCloseMargin = 0, FootingMargin = 15;
+        // Each ship's own Margin is set by its voyage: the one its steering has earned (SteeringScatter), at sea and in port; CloseMargin
+        // where none is known (the route clock's estimate, a voyage's start).
+        public const double CloseMargin = 5, FootingMargin = 15;
         public double Margin { get; set; } = CloseMargin;
         // Decision 166 (the user, 2026-10-11: "could've sail more close to the wind while still be able to go forward"): she sails
         // FootingMargin further off only as she nears a stop, under FootingSpeed (full at none), not under MinTackSpeed (run
@@ -9878,6 +10985,12 @@ namespace ShipwrightAndTransport.Sailing
         // Decision 209 (d): she sails her planned line (decision 198), set by her voyage each tick; straight at her guide on it comes first.
         public bool OnLine { get; set; }
         private bool holdingHeading;
+        // Whether a heading's way is clear of moving traffic (set by the voyage each tick; null: traffic not weighed). A course
+        // meeting traffic is not usable while another is; with none clear of it the choice ignores traffic (TrafficIgnored).
+        public Func<double, bool> Traffic { get; set; }
+        public bool TrafficIgnored { get; private set; }
+        // True for a choice in which traffic took a course that was clear of land and lying boats.
+        public bool TrafficSteered { get; private set; }
         // Her sails refilled (after losing way, decision 126) also on a reach this far off the wind with this much way.
         public const double RefillReach = 80, RefillReachSpeed = 2.0;
 
@@ -9895,6 +11008,8 @@ namespace ShipwrightAndTransport.Sailing
         public bool Chose { get; private set; }
         // Blocked because no clear, sailable course makes way toward her guide point (the voyage plans her routes again first).
         public bool NoWay { get; private set; }
+        // Blocked because a tack or wear timed out or stalled (the voyage's FaultKind.Manoeuvre).
+        public bool TurnFailed { get; private set; }
         // Decision 131: she holds GatherHeading while she gathers way; for the tick it began or ended (the voyage logs it).
         public bool Gathering { get; private set; }
         public double GatherHeading { get; private set; }
@@ -9937,9 +11052,9 @@ namespace ShipwrightAndTransport.Sailing
         // A fresh start (a resume, a hold's retry, the end of the unberthing stage): her course is chosen on the next tick.
         public void Restore(int tack)
         {
-            Tack = tack; State = Manoeuvre.Direct; planned = false; refill = countOnCompletion = NoWay = false;
+            Tack = tack; State = Manoeuvre.Direct; planned = false; refill = countOnCompletion = NoWay = swingBack = TurnFailed = TrafficIgnored = TrafficSteered = false;
             avoiding = holdingHeading = false; rechooseWhy = lastChoice = null;
-            turning = turnNoProgress = stalled = 0; Reason = "Choosing her course.";
+            turning = turnNoProgress = stalled = 0; Reason = "Choosing its course.";
             Gathering = false; gatherArmed = hadWay = true;
             steady = tackWait = 0; tackFailures = 0; lastSample = double.NaN;
             resideNext = wearGivenUp = tackGivenUp = false;
@@ -9972,7 +11087,7 @@ namespace ShipwrightAndTransport.Sailing
             if (State != Manoeuvre.Tacking && State != Manoeuvre.Wearing) { Rechoose(why); return; }
             if (State == Manoeuvre.Wearing && !refill) wearGivenUp = true;
             if (State == Manoeuvre.Tacking) tackGivenUp = true;
-            State = PlainState; turning = turnNoProgress = 0; refill = countOnCompletion = false; sinceTurn = 0;
+            State = PlainState; turning = turnNoProgress = 0; refill = countOnCompletion = swingBack = false; sinceTurn = 0;
             resideNext = true;
             Rechoose(why);
         }
@@ -9980,13 +11095,37 @@ namespace ShipwrightAndTransport.Sailing
         // given up (its way blocked) left her side on the wear's new side; her next course across the wind's eye was no turn to the
         // navigator, and the helm's guard wore her round her stern anyway, down the wind onto Dragon Cliffs' east docks.
         public const double WearRetry = 10;
-        // Decision 173: her bow fell across the wind's eye with no turn under way (the helm's guard saw it): her side taken from her
-        // bow on the next tick, and her course chosen again.
-        public void FellAcross(string why)
+        // A turn rate (degrees a second) at or above which a bow across the wind's eye is swinging through it, not fallen across.
+        public const double FellTurnRate = 3;
+        // An order the helm's guard handed back (UpwindLimits.Guard: its turn would cross the wind's eye with no tack under way). With the
+        // bow inside close-hauled on the other side from the side held: swinging through (FellTurnRate or more) a swing back, a tack onto the
+        // side held that the voyage checks as any tack, unless a tack was given up within WearRetry; fallen across slowly, the bow's side is
+        // taken on the next tick. Otherwise the bow's side is taken if it differs, and the course chosen again on the next tick.
+        public void BowAcross(double heading, double windFrom, double noGo, double turnRate)
         {
-            if (State == Manoeuvre.Tacking || State == Manoeuvre.Wearing) return;
-            resideNext = true;
-            Rechoose(why);
+            if (State == Manoeuvre.Tacking || State == Manoeuvre.Wearing || State == Manoeuvre.Blocked) return;
+            int bow = Side(windFrom, heading);
+            bool inside = Math.Abs(NavigationMath.Delta(windFrom, heading)) < BeatOff(noGo, Margin);
+            if (Tack != 0 && bow != Tack && inside && Math.Abs(turnRate) >= FellTurnRate && !tackGivenUp)
+            {
+                StartTurn(heading, bow, false, "Swinging through the wind's eye (" + turnRate.ToString("F0") + " degrees a second): a tack back onto the side it held.");
+                State = Manoeuvre.Tacking; swingBack = true;
+                tackStartSpeed = double.NaN; tackCrossed = false;
+                return;
+            }
+            if (bow != Tack) resideNext = true;
+            Rechoose(bow != Tack ? "the bow fell across the wind's eye" : "the helm's order crossed the wind's eye");
+        }
+        // The tack under way is a swing back (BowAcross): no tack loss learned from it, and losing it isn't a failed tack.
+        private bool swingBack;
+        // A failed turn recovered at once (the voyage's fault ladder): the bow borne away on the side it lies to fill the sails, as after
+        // a stall, and the course chosen again.
+        public void BearAway(double heading, double windFrom)
+        {
+            if (!NavigationMath.Finite(heading) || !NavigationMath.Finite(windFrom)) throw new ArgumentException("Non-finite bear-away sample.");
+            Restore(Side(windFrom, heading));
+            StartTurn(heading, Tack, true, "A failed turn recovered at once: bearing away to fill the sails.");
+            Demand = NavigationMath.Normalize(windFrom + Tack * 120);
         }
         // A tack given up (its way blocked) isn't begun again within WearRetry either (run 20261012-072254 on FJ: the Brig's tack, its arc
         // blocked by Cube, was begun and given up every tick for 30 s, each start leading her helm up toward the wind, and she crept
@@ -10008,6 +11147,8 @@ namespace ShipwrightAndTransport.Sailing
                 if (!NavigationMath.Finite(v)) throw new ArgumentException("Non-finite manoeuvre sample.");
             if (dt < 0 || dt > 1 || noGo < 10 || noGo >= 90 || clear == null) throw new ArgumentException("Invalid manoeuvre limits.");
             Chose = false; GatherBegan = false; GatherEnded = null; TackAborted = null; WaitingToTack = false; WearBegan = false; LossLearned = null; sinceTurn += dt; sinceChoice += dt;
+            if (wearAllowed > 0) wearAllowed = Math.Max(0, wearAllowed - dt);
+            wind = new HeadingWind(windFrom, trueFrom, trueStrength, ExpectedSpeed(speed), Side(windFrom, heading));
             // Decision 133: how long her heading has held steady.
             if (!double.IsNaN(lastSample) && dt > 0) steady = Math.Abs(NavigationMath.Delta(lastSample, heading)) / dt < SteadyRate ? steady + dt : 0;
             lastSample = heading;
@@ -10020,11 +11161,10 @@ namespace ShipwrightAndTransport.Sailing
             // Armed again once she has had RegatherSpeed since her last gathering and lost it (a turn that slowed her).
             if (speed >= RegatherSpeed) hadWay = true;
             else if (hadWay) gatherArmed = true;
-            if (State == Manoeuvre.Blocked) { StopGathering("she is held"); return Demand; }
-            if (State == Manoeuvre.Tacking || State == Manoeuvre.Wearing) { StopGathering("she turns"); return Turn(heading, bearing, windFrom, noGo, speed, dt); }
-            // Decision 225 (15): with no tack or wear under way, her side is her bow's once her bow lies outside close-hauled (it swung
-            // across with her helm at nought: a wait, a hold): a course on her old side is then a change of side, a tack or a wear, not a
-            // turn round her stern the long way (Voyage.Steer). Inside close-hauled her side stays (decision 173 there).
+            if (State == Manoeuvre.Blocked) { StopGathering("it is held"); return Demand; }
+            if (State == Manoeuvre.Tacking || State == Manoeuvre.Wearing) { StopGathering("it turns"); return Turn(heading, bearing, windFrom, noGo, speed, dt); }
+            // With no tack or wear under way the side held is the bow's once the bow lies outside close-hauled, so a course on the old side
+            // is a change of side (BeginTurn). Inside close-hauled BowAcross decides.
             if (Math.Abs(NavigationMath.Delta(windFrom, heading)) >= noGo + Margin) Tack = Side(windFrom, heading);
             // A grace to gather way (back in physics at the clock's speed, her sails still setting): no stall counts until it is
             // out (run 20261010-122604).
@@ -10032,13 +11172,15 @@ namespace ShipwrightAndTransport.Sailing
             stalled = speed < 0.25 ? stalled + dt : 0;
             if (stalled > 12 && Tack != 0)
             {
-                StopGathering("no way on her heading");
+                StopGathering("no way on its heading");
                 StartTurn(heading, Tack, true, "Lost forward steerage; bearing away to refill sails.");
                 return Demand = NavigationMath.Normalize(windFrom + Tack * 120);
             }
-            if (Reconsider(bearing, windFrom, noGo, directClear, clear, out string why))
+            // The way ahead closing by traffic chooses again, as by land; while traffic is ignored it is weighed again after AvoidRecheck.
+            Func<double, bool> pass = Traffic == null || TrafficIgnored ? clear : h => clear(h) && Traffic(h);
+            if (Reconsider(bearing, windFrom, noGo, directClear, pass, out string why))
                 Choose(heading, bearing, windFrom, noGo, directClear, clear, why);
-            if (State == Manoeuvre.Blocked) { StopGathering("she is held"); return Demand; }
+            if (State == Manoeuvre.Blocked) { StopGathering("it is held"); return Demand; }
             double course = Course(bearing, windFrom, noGo, speed);
             CourseHeading = course;
             State = PlainState;
@@ -10046,17 +11188,18 @@ namespace ShipwrightAndTransport.Sailing
             if (Gather(heading, course, windFrom, noGo, speed, dt, clear))
             {
                 Tack = Side(windFrom, GatherHeading);
-                Reason = "Gathering way on her heading before she turns to her course.";
+                Reason = "Gathering way on its heading before it turns to its course.";
                 return Demand = GatherHeading;
             }
             int side = Side(windFrom, course);
             // On the other side of the wind: across the wind's eye a tack (a wear when slow); round her stern a plain turn.
             // Decision 167: or a change of side over SternTurnMost, which read as round her stern (run 20261011-164839 on EH: from 205
             // to 26 the short way, 179 degrees, missed the wind's eye; she bore away downwind unasked, ran at 3.4 m/s and struck Terrain).
+            // Its short way round her stern, the change of side is a wear (its own state and arc check), never a tack through the eye.
             if (side != Tack && (CrossesEye(heading, course, windFrom) || Math.Abs(NavigationMath.Delta(heading, course)) > SternTurnMost))
-                return BeginTurn(side, heading, bearing, windFrom, noGo, speed, dt, clear);
+                return BeginTurn(side, heading, bearing, windFrom, noGo, speed, dt, clear, !CrossesEye(heading, course, windFrom));
             Tack = side; tackWait = 0;
-            Reason = holdingHeading ? "Holding her heading: clear and making way (decision 180)." : avoiding ? "Keeping clear of what lies on her way to her guide point." : direct ? "Sailing at her guide point." : "Beating toward her guide point.";
+            Reason = holdingHeading ? "Holding its heading: clear and making way (decision 180)." : avoiding ? "Keeping clear of what lies on its way to its guide point." : direct ? "Sailing at its guide point." : "Beating toward its guide point.";
             // Her heading's way blocked (decision 140): straight to her course, not led up 15 degrees at a time.
             return Demand = clear(heading) ? Luff(heading, course, windFrom) : course;
         }
@@ -10065,18 +11208,18 @@ namespace ShipwrightAndTransport.Sailing
         private bool Gather(double heading, double course, double windFrom, double noGo, double speed, double dt, Func<double, bool> clear)
         {
             double close = noGo + Margin;
-            if (BearingAway) { StopGathering("she bears away against her weather helm"); return false; }
+            if (BearingAway) { StopGathering("it bears away against its weather helm"); return false; }
             if (Gathering)
             {
                 gatherTime += dt;
                 if (speed > gatherBest + 0.1) { gatherBest = speed; gatherFlat = 0; }
                 else gatherFlat += dt;
-                string end = speed >= GatherSpeed ? "she has way (" + speed.ToString("F1") + " m/s)"
-                    : gatherFlat >= GatherPlateau ? "her speed stopped rising (" + speed.ToString("F1") + " m/s)"
+                string end = speed >= GatherSpeed ? "it has way (" + speed.ToString("F1") + " m/s)"
+                    : gatherFlat >= GatherPlateau ? "its speed stopped rising (" + speed.ToString("F1") + " m/s)"
                     : gatherTime >= GatherMost ? GatherMost.ToString("F0") + " s on it (" + speed.ToString("F1") + " m/s)"
-                    : Math.Abs(NavigationMath.Delta(windFrom, GatherHeading)) < close ? "the wind came onto her bow"
-                    : !clear(GatherHeading) ? "her way ahead closes"
-                    : Math.Abs(NavigationMath.Delta(GatherHeading, course)) <= GatherAlign ? "her course came round to her heading"
+                    : Math.Abs(NavigationMath.Delta(windFrom, GatherHeading)) < close ? "the wind came onto its bow"
+                    : !clear(GatherHeading) ? "its way ahead closes"
+                    : Math.Abs(NavigationMath.Delta(GatherHeading, course)) <= GatherAlign ? "its course came round to its heading"
                     : null;
                 if (end == null) return true;
                 StopGathering(end);
@@ -10111,26 +11254,27 @@ namespace ShipwrightAndTransport.Sailing
         {
             why = null;
             if (!planned) { why = rechooseWhy ?? "a fresh start"; rechooseWhy = null; return true; }
+            if (TrafficIgnored && Traffic != null && sinceChoice >= AvoidRecheck) { why = "it looks again past the moving traffic"; return true; }
             double shift = Math.Abs(NavigationMath.Delta(windAtChoice, windFrom));
             if (steady > 0 && shift > WindShift) { why = "the wind shifted " + shift.ToString("F0") + " degrees"; return true; }
-            double gap = NavigationMath.Delta(windFrom, bearing), close = noGo + Margin;
+            double gap = wind.Off(bearing), close = noGo + Margin;
             if (avoiding)
             {
-                if (!clear(Demand)) { why = "her way ahead closes"; return true; }
-                if (sinceChoice >= AvoidRecheck) { why = "she looks again past what she keeps clear of"; return true; }
+                if (!clear(Demand)) { why = "its way ahead closes"; return true; }
+                if (sinceChoice >= AvoidRecheck) { why = "it looks again past what it keeps clear of"; return true; }
                 return false;
             }
             if (direct)
             {
-                if (!directClear) { why = "her guide point is no longer in clear water"; return true; }
-                if (Math.Abs(gap) < close) { why = "her guide point lies in her no-go"; return true; }
+                if (!directClear) { why = "its guide point is no longer in clear water"; return true; }
+                if (Math.Abs(gap) < close) { why = "its guide point lies in its no-go"; return true; }
             }
             else
             {
-                if (directClear && planSide * gap >= BeatOff(noGo, Margin) + 3 && clear(bearing)) { why = "she can lay her guide point"; return true; }
-                if (-planSide * gap >= BeatOff(noGo, Margin) + 3) { why = "the other tack lays her guide point"; return true; }
+                if (directClear && planSide * gap >= BeatOff(noGo, Margin) + 3 && clear(bearing)) { why = "it can lay its guide point"; return true; }
+                if (-planSide * gap >= BeatOff(noGo, Margin) + 3) { why = "the other tack lays its guide point"; return true; }
             }
-            if (!clear(Demand)) { why = "her way ahead closes"; return true; }
+            if (!clear(Demand)) { why = "its way ahead closes"; return true; }
             return false;
         }
 
@@ -10140,31 +11284,54 @@ namespace ShipwrightAndTransport.Sailing
         private void Choose(double heading, double bearing, double windFrom, double noGo, bool directClear, Func<double, bool> clear, string why)
         {
             int current = Tack != 0 ? Tack : Side(windFrom, heading);
-            double close = noGo + Margin, gap = NavigationMath.Delta(windFrom, bearing);
+            double close = noGo + Margin, gap = wind.Off(bearing);
             var text = new StringBuilder(why).Append(":");
             var courses = new System.Collections.Generic.List<Candidate>
             {
                 new Candidate("straight at it", true, gap < 0 ? -1 : 1, bearing, directClear && Math.Abs(gap) >= close),
-                new Candidate("close-hauled, the wind to port", false, 1, windFrom + BeatOff(noGo, Margin), true),
-                new Candidate("close-hauled, the wind to starboard", false, -1, windFrom - BeatOff(noGo, Margin), true),
+                new Candidate("close-hauled, the wind to port", false, 1, wind.At(1, BeatOff(noGo, Margin)), true),
+                new Candidate("close-hauled, the wind to starboard", false, -1, wind.At(-1, BeatOff(noGo, Margin)), true),
             };
-            foreach (var c in courses) c.Usable = c.Possible && clear(c.Heading);
-            // Something in her way (a course's way blocked, or her guide point out of clear water outside her no-go): the fan of
-            // headings around her guide point, sailable and clear, keeping clear of it (the user, 2026-10-11).
-            bool obstructed = courses.Exists(c => c.Possible && !c.Usable) || !directClear && Math.Abs(gap) >= close;
+            // With Traffic, the courses are judged clear of moving traffic too; when none would be taken so, judged again without it.
+            bool obstructed = false, ignored = false;
             int fanned = 0;
-            if (obstructed)
-                for (int k = 1; k * AvoidStep < 180; k++)
-                    foreach (int s in new[] { 1, -1 })
-                    {
-                        double h = NavigationMath.Normalize(bearing + s * k * AvoidStep);
-                        if (Math.Abs(NavigationMath.Delta(windFrom, h)) < close || !clear(h)) continue;
-                        courses.Add(new Candidate("keeping clear at " + h.ToString("F0"), false, Side(windFrom, h), h, true) { Avoid = true, Usable = true });
-                        fanned++;
-                    }
+            TrafficSteered = false;
+            for (int round = Traffic != null ? 0 : 1; round < 2; round++)
+            {
+                bool weigh = round == 0;
+                courses.RemoveRange(3, courses.Count - 3);
+                fanned = 0;
+                foreach (var c in courses)
+                {
+                    bool land = c.Possible && clear(c.Heading);
+                    c.Usable = land && (!weigh || Traffic(c.Heading));
+                    c.Traffic = land && !c.Usable;
+                }
+                // Something in her way (a course's way blocked, or her guide point out of clear water outside her no-go): the fan of
+                // headings around her guide point, sailable and clear, keeping clear of it (the user, 2026-10-11).
+                obstructed = courses.Exists(c => c.Possible && !c.Usable) || !directClear && Math.Abs(gap) >= close;
+                if (obstructed)
+                    for (int k = 1; k * AvoidStep < 180; k++)
+                        foreach (int s in new[] { 1, -1 })
+                        {
+                            double h = NavigationMath.Normalize(bearing + s * k * AvoidStep);
+                            if (Math.Abs(wind.Off(h)) < close || !clear(h) || weigh && !Traffic(h)) continue;
+                            courses.Add(new Candidate("keeping clear at " + h.ToString("F0"), false, Side(windFrom, h), h, true) { Avoid = true, Usable = true });
+                            fanned++;
+                        }
+                // Traffic is passed only on a heading that still makes way toward the guide point.
+                if (!weigh || courses.Exists(c => c.Usable && Vmg(c.Heading, bearing, wind, noGo) > LeastWay))
+                {
+                    TrafficSteered = weigh && courses.Exists(c => c.Traffic);
+                    break;
+                }
+                ignored = true;
+            }
+            TrafficIgnored = ignored;
+            if (ignored) text.Append(" no heading clear of moving traffic, chosen without it;");
             foreach (var c in courses)
             {
-                c.Way = Vmg(c.Heading, bearing, windFrom, noGo);
+                c.Way = Vmg(c.Heading, bearing, wind, noGo);
                 c.Score = c.Way - (c.Side == current ? 0 : CrossesEye(heading, c.Heading, windFrom) ? TackCost : TurnCost);
                 // The heading she keeps clear on is kept unless another makes AvoidKeep more way (no swing from side to side).
                 if (avoiding && c.Avoid && Math.Abs(NavigationMath.Delta(c.Heading, avoidHeading)) < AvoidStep / 2) c.Score += AvoidKeep;
@@ -10174,8 +11341,8 @@ namespace ShipwrightAndTransport.Sailing
             {
                 if (c.Avoid) continue;
                 text.Append(' ').Append(c.Name).Append(' ');
-                if (!c.Possible) { text.Append("(not in clear water outside her no-go);"); continue; }
-                if (!c.Usable) { text.Append("(her way ahead is blocked);"); continue; }
+                if (!c.Possible) { text.Append("(not in clear water outside its no-go);"); continue; }
+                if (!c.Usable) { text.Append(c.Traffic ? "(moving traffic predicted on its way);" : "(its way ahead is blocked);"); continue; }
                 text.Append(c.Way.ToString("F2")).Append(';');
             }
             // Decision 209 (d): on her planned line (OnLine) its way is her course: straight at her guide on it whenever that is clear and
@@ -10190,14 +11357,15 @@ namespace ShipwrightAndTransport.Sailing
                     if (!c.Usable || c.Way <= LeastWay) continue;
                     if (best == null || c.Score > best.Score) best = c;
                 }
-            if (obstructed) text.Append(' ').Append(fanned).Append(" clear headings around her guide point;");
-            if (KeepHeading && !OnLine && best != null && Math.Abs(NavigationMath.Delta(heading, best.Heading)) > HoldTurn && Math.Abs(NavigationMath.Delta(windFrom, heading)) >= close && clear(heading))
+            if (obstructed) text.Append(' ').Append(fanned).Append(" clear headings around its guide point;");
+            if (KeepHeading && !OnLine && best != null && Math.Abs(NavigationMath.Delta(heading, best.Heading)) > HoldTurn && Math.Abs(NavigationMath.Delta(windFrom, heading)) >= close && clear(heading) &&
+                (Traffic == null || ignored || Traffic(heading)))
             {
-                double way = Vmg(heading, bearing, windFrom, noGo);
+                double way = Vmg(heading, bearing, wind, noGo);
                 if (way > LeastWay && way >= HoldShare * best.Way)
                 {
-                    text.Append(" her heading as it is (").Append(NavigationMath.Normalize(heading).ToString("F0")).Append(") ").Append(way.ToString("F2")).Append(", instead of a turn to ").Append(best.Name).Append(" (decision 180);");
-                    best = new Candidate("her heading as it is (" + NavigationMath.Normalize(heading).ToString("F0") + ")", false, Side(windFrom, heading), heading, true) { Avoid = true, Usable = true, Hold = true, Way = way };
+                    text.Append(" its heading as it is (").Append(NavigationMath.Normalize(heading).ToString("F0")).Append(") ").Append(way.ToString("F2")).Append(", instead of a turn to ").Append(best.Name).Append(" (decision 180);");
+                    best = new Candidate("its heading as it is (" + NavigationMath.Normalize(heading).ToString("F0") + ")", false, Side(windFrom, heading), heading, true) { Avoid = true, Usable = true, Hold = true, Way = way };
                 }
             }
             bool noWay = false;
@@ -10211,13 +11379,13 @@ namespace ShipwrightAndTransport.Sailing
             // Looking again and keeping the same heading, or the same course taken again for the same reason (run 20261011-005455:
             // "the other tack lays her guide point" every tick while she keeps her new side), isn't a new choice (the voyage logs each).
             string key = why + "|" + (best == null ? "none" : best.Avoid ? "clear " + Math.Round(best.Heading / AvoidStep) : best.Name);
-            Chose = !(same && why.StartsWith("she looks again", StringComparison.Ordinal)) && key != lastChoice;
+            Chose = !(same && why.StartsWith("it looks again", StringComparison.Ordinal)) && key != lastChoice;
             lastChoice = key;
             if (best == null)
             {
                 planned = false; NoWay = true; avoiding = holdingHeading = false;
                 Choice = text.Append(" none makes way").ToString();
-                Block("No clear, sailable course makes way toward her guide point.", heading);
+                Block("No clear, sailable course makes way toward its guide point.", heading);
                 return;
             }
             planned = true; NoWay = noWay; direct = best.Direct; planSide = best.Side;
@@ -10228,7 +11396,7 @@ namespace ShipwrightAndTransport.Sailing
         private sealed class Candidate
         {
             internal readonly string Name; internal readonly bool Direct, Possible; internal readonly int Side; internal readonly double Heading;
-            internal bool Usable, Avoid, Hold; internal double Way, Score;
+            internal bool Usable, Avoid, Hold, Traffic; internal double Way, Score;
             internal Candidate(string name, bool isDirect, int side, double heading, bool possible)
             { Name = name; Direct = isDirect; Side = side; Heading = NavigationMath.Normalize(heading); Possible = possible; }
         }
@@ -10240,10 +11408,10 @@ namespace ShipwrightAndTransport.Sailing
             double least = BeatOff(noGo, Margin) + Footing(speed);
             if (direct || avoiding)
             {
-                double aim = avoiding ? avoidHeading : bearing, gap = NavigationMath.Delta(windFrom, aim);
-                return Math.Abs(gap) >= least ? NavigationMath.Normalize(aim) : NavigationMath.Normalize(windFrom + (gap < 0 ? -1 : 1) * least);
+                double aim = avoiding ? avoidHeading : bearing, gap = wind.Off(aim);
+                return Math.Abs(gap) >= least ? NavigationMath.Normalize(aim) : wind.At(gap < 0 ? -1 : 1, least);
             }
-            return NavigationMath.Normalize(windFrom + planSide * least);
+            return wind.At(planSide, least);
         }
 
         // Across the wind's eye (decisions 126, 133): a tack, whatever her rig, once she meets a tack's requirements (her speed to
@@ -10255,14 +11423,40 @@ namespace ShipwrightAndTransport.Sailing
         // for, LossPerDegree); a wear only with no room to wait or no speed after TackWaitMost, where its turn is clear (decision 191).
         // A tack lost across the wind still bears away on her new side to fill her sails.
         public bool NoWear { get; set; }
+        // Seconds in which a change of side short of a tack's speed wears at once, in port too (its arc checked by the voyage).
+        private double wearAllowed;
+        public void AllowWear(double seconds) => wearAllowed = Math.Max(0, seconds);
+        public bool WearAllowed => wearAllowed > 0;
 
-        private double BeginTurn(int side, double heading, double bearing, double windFrom, double noGo, double speed, double dt, Func<double, bool> clear)
+        // A change of side is a tack only while its turn through the wind's eye (the heading's angle off the true wind and close-hauled's on
+        // the new side) takes at most TackSecondsMost at the hull's full-helm turn (FullHelmTurn, degrees a second, set by the voyage);
+        // longer, a wear (its arc checked by the voyage, in port too). Where the turn isn't known, a wear when close-hauled lies WearPastOff
+        // or more off the true wind and the turn through the eye is over 180 degrees. After MaxTackFailures tacks lost before the wind's eye
+        // the hull wears for the rest of its voyage (WearsOnly). PlanTackSpeed: the speed a planner judges a hull's tack at.
+        public const double TackSecondsMost = 35, WearPastOff = 90, PlanTackSpeed = 2.5;
+        public double FullHelmTurn { get; set; } = double.NaN;
+        public bool WearsOnly { get; private set; }
+        public void KeepWearsOnly(bool wears) { if (wears) WearsOnly = true; }
+        // The seconds a tack's turn of `turn` degrees takes at `fullHelmTurn` degrees a second; NaN when either is unknown.
+        public static double TackSeconds(double turn, double fullHelmTurn) => fullHelmTurn > 0 && NavigationMath.Finite(turn) ? turn / fullHelmTurn : double.NaN;
+        public static bool TackTooLong(double closeOff, double turn, double fullHelmTurn)
+        {
+            double t = TackSeconds(turn, fullHelmTurn);
+            return double.IsNaN(t) ? closeOff >= WearPastOff && turn > 180 : t > TackSecondsMost;
+        }
+        // A heading's angle off the true wind (off the apparent wind where the true wind isn't known).
+        private double TrueOff(double heading) => Math.Abs(NavigationMath.Delta(wind.Known ? wind.True : wind.Apparent, heading));
+
+        // `sternWay`: the change of side's short way runs round her stern.
+        private double BeginTurn(int side, double heading, double bearing, double windFrom, double noGo, double speed, double dt, Func<double, bool> clear, bool sternWay = false)
         {
             if (NoWear && Tack == 0) Tack = Side(windFrom, heading);
-            double hold = NavigationMath.Normalize(windFrom + Tack * (BeatOff(noGo, Margin) + Footing(speed)));
-            bool canTack = CanTack(speed, heading, windFrom);
+            double hold = wind.At(Tack, BeatOff(noGo, Margin) + Footing(speed));
+            bool canTack = CanTack(speed, heading, windFrom), wearNow = wearAllowed > 0;
+            double closeOff = TrueOff(wind.At(side, BeatOff(noGo, Margin))), tackTurn = closeOff + TrueOff(heading);
+            bool tooLong = WearsOnly || sternWay || TackTooLong(closeOff, tackTurn, FullHelmTurn);
             // Decision 168: no waiting for a steady heading; her speed to finish it (decision 161) and her sails drawing decide.
-            if (canTack && SailsDrawing && tackFailures < MaxTackFailures && !tackGivenUp)
+            if (!tooLong && canTack && SailsDrawing && tackFailures < MaxTackFailures && !tackGivenUp)
             {
                 tackWait = 0;
                 StartTurn(heading, Tack != 0 ? Tack : -side, false, "Committed tack (" + speed.ToString("F1") + " m/s, " + SpeedToTack(heading, windFrom).ToString("F1") + " needed to cross the wind).");
@@ -10271,7 +11465,7 @@ namespace ShipwrightAndTransport.Sailing
                 return Demand = NavigationMath.Normalize(windFrom + side * TackPastEye);
             }
             tackWait += dt;
-            if (NoWear)
+            if (NoWear && !wearNow && !tooLong)
             {
                 // Decision 191 (the user, 2026-10-12, asked how the Kakam, 1.1-1.2 m/s close-hauled in a light air short of the 1.4 her tack
                 // needed, should get out of Dragon Cliffs' basin with no wear: "foot off to build speed"): short of a tack's speed she
@@ -10280,39 +11474,45 @@ namespace ShipwrightAndTransport.Sailing
                 // And (the user: "if it still don't work, allow wearing only where there is room"): with no room to foot off nor to hold
                 // close-hauled, or no tack's speed after TackWaitMost, a wear, its turn checked clear by her voyage (WearArcClear: given
                 // up when it isn't, then blocked, decision 170).
-                double footed = NavigationMath.Normalize(windFrom + Tack * (BeatOff(noGo, Margin) + Math.Max(Footing(speed), canTack ? 0 : FootingMargin)));
+                double footed = wind.At(Tack, BeatOff(noGo, Margin) + Math.Max(Footing(speed), canTack ? 0 : FootingMargin));
                 bool footing = !canTack && clear(footed);
                 if ((footing || clear(hold)) && tackWait < TackWaitMost)
                 {
                     if (tackFailures >= MaxTackFailures) tackFailures = 0;
                     WaitingToTack = true;
                     Reason = "Waiting to tack, no wear in port (decision 190): " + (!canTack ? speed.ToString("F1") + " of " + SpeedToTack(heading, windFrom).ToString("F1") + " m/s to cross the wind" +
-                        (footing ? ", footing off to build it (decision 191)" : "") : "her sails not drawing") + ".";
+                        (footing ? ", footing off to build it (decision 191)" : "") : "its sails not drawing") + ".";
                     return Demand = Luff(heading, footing ? footed : hold, windFrom);
                 }
             }
-            string wear = Tack == 0 ? "no side yet" : tackFailures >= MaxTackFailures ? tackFailures + " tacks failed" : !clear(hold) ? "her side's way is blocked"
-                : tackWait >= TackWaitMost ? "no tacking speed in " + TackWaitMost.ToString("F0") + " s" : null;
+            string wear = Tack == 0 ? "no side yet" : wearNow ? "a backing ended short of its heading"
+                : WearsOnly ? MaxTackFailures + " tacks were lost before the wind's eye on this voyage, so it wears"
+                : sternWay ? "the short way to its course runs round its stern (" + Math.Abs(NavigationMath.Delta(heading, bearing)).ToString("F0") + " degrees)"
+                : tooLong ? (FullHelmTurn > 0 ? "a tack's turn through the wind's eye (" + tackTurn.ToString("F0") + " degrees) takes " + TackSeconds(tackTurn, FullHelmTurn).ToString("F0") +
+                    " s at its full-helm turn (" + FullHelmTurn.ToString("F1") + " degrees a second), over " + TackSecondsMost.ToString("F0") + " s"
+                    : "close-hauled lies " + closeOff.ToString("F0") + " degrees off the true wind, so a tack would turn further than a wear")
+                : tackFailures >= MaxTackFailures ? tackFailures + " tacks failed"
+                : !clear(hold) ? "its side's way is blocked" : tackWait >= TackWaitMost ? "no tacking speed in " + TackWaitMost.ToString("F0") + " s" : null;
             if (wear != null && wearGivenUp)
             {
                 wearGivenUp = false;
-                return Block("Her wear's way is blocked again and she can't tack (" + speed.ToString("F1") + " m/s; decision 170).", heading);
+                return Block("Its wear's way is blocked again and it can't tack (" + speed.ToString("F1") + " m/s; decision 170).", heading);
             }
             if (wear != null)
             {
-                tackWait = 0; tackFailures = 0;
+                tackWait = 0; tackFailures = 0; wearAllowed = 0;
                 StartTurn(heading, Tack != 0 ? Tack : -side, false, "Committed wear: " + wear + " (" + speed.ToString("F1") + " m/s" + (NoWear ? "; in port only where its turn is clear, decision 191" : "") + ").");
                 Tack = side; State = Manoeuvre.Wearing; WearBegan = true;
                 return Demand = NavigationMath.Normalize(heading + previousSide * 60);
             }
             WaitingToTack = true;
-            Reason = "Waiting to tack: " + (!canTack ? speed.ToString("F1") + " of " + SpeedToTack(heading, windFrom).ToString("F1") + " m/s to cross the wind" : "her sails not drawing") + ".";
+            Reason = "Waiting to tack: " + (!canTack ? speed.ToString("F1") + " of " + SpeedToTack(heading, windFrom).ToString("F1") + " m/s to cross the wind" : "its sails not drawing") + ".";
             return Demand = Luff(heading, hold, windFrom);
         }
 
         private void StartTurn(double heading, int fromSide, bool refillTurn, string reason)
         {
-            previousSide = fromSide; refill = refillTurn; countOnCompletion = !refillTurn; refilled = false;
+            previousSide = fromSide; refill = refillTurn; countOnCompletion = !refillTurn; refilled = false; swingBack = false;
             turning = turnNoProgress = 0; turnBestError = 180; lastHeading = heading; sinceTurn = 0;
             if (refillTurn) { Tack = fromSide; State = Manoeuvre.Wearing; }
             Reason = reason;
@@ -10338,7 +11538,7 @@ namespace ShipwrightAndTransport.Sailing
                 }
                 if (error < turnBestError - 1) { turnBestError = error; turnNoProgress = 0; }
                 else turnNoProgress += dt;
-                if (turning > 100) return Block("Manoeuvre timed out without steerage.", heading);
+                if (turning > 100) return Block("Manoeuvre timed out without steerage.", heading, true);
                 if (error < 12 && speed > 0.35) { tackFailures = 0; return Complete(target, "Tack done with forward steerage."); }
                 // Decision 133: lost under TackAbortSpeed (after 2 s of it), with no turn toward her new course for 10 s, or after
                 // 75 s.
@@ -10351,17 +11551,19 @@ namespace ShipwrightAndTransport.Sailing
                     // Before the wind's eye: back onto her old tack, where she gathers way and tries again (MaxTackFailures, then
                     // a wear), never left in irons. Decision 161: her loss learned from the turn she made.
                     LearnLoss(tackStartSpeed, speed, tackStartOff - Math.Abs(NavigationMath.Delta(windFrom, heading)));
-                    ++tackFailures;
+                    if (!swingBack && ++tackFailures >= MaxTackFailures) WearsOnly = true;
                     Tack = previousSide; State = PlainState;
                     turning = 0; sinceTurn = 0; steady = 0; countOnCompletion = false;
                     gatherArmed = hadWay = true;
-                    TackAborted = speed.ToString("F1") + " m/s before the wind's eye (" + tackFailures + " of " + MaxTackFailures + ")";
-                    Reason = "Tack given up before the wind's eye; back on her old tack to gather way.";
-                    return Demand = NavigationMath.Normalize(windFrom + previousSide * (BeatOff(noGo, Margin) + Footing(speed)));
+                    TackAborted = speed.ToString("F1") + " m/s before the wind's eye (" + (swingBack ? "a swing back, not counted" : tackFailures + " of " + MaxTackFailures +
+                        (WearsOnly ? "; it wears to change sides for the rest of this voyage" : "")) + ")";
+                    swingBack = false;
+                    Reason = "Tack given up before the wind's eye; back on its old tack to gather way.";
+                    return Demand = wind.At(previousSide, BeatOff(noGo, Margin) + Footing(speed));
                 }
                 // Across the wind: she bears away on her new side at once to fill her sails.
                 double spent = turning;
-                StartTurn(heading, Tack, true, "Tack lost way across the wind; bearing away on her new side to fill her sails.");
+                StartTurn(heading, Tack, true, "Tack lost way across the wind; bearing away on its new side to fill its sails.");
                 turning = spent;
                 State = Manoeuvre.Wearing;
                 countOnCompletion = true;
@@ -10371,7 +11573,7 @@ namespace ShipwrightAndTransport.Sailing
             double step = NavigationMath.Delta(lastHeading, heading) * previousSide;
             lastHeading = heading;
             turnNoProgress = step > 0.2 * Math.Max(dt, 0.02) ? 0 : turnNoProgress + dt;
-            if (turning > 100) return Block("Manoeuvre timed out without steerage.", heading);
+            if (turning > 100) return Block("Manoeuvre timed out without steerage.", heading, true);
             if (refill)
             {
                 // Bear away on her side until the wind is 110 degrees off and she has way again, then back to her course.
@@ -10383,16 +11585,16 @@ namespace ShipwrightAndTransport.Sailing
                 refilled = filled;
                 if (!filled)
                 {
-                    if (turnNoProgress > 30 && Math.Abs(off) < 110) return Block("Bearing away stalls: her bow isn't falling off.", heading);
+                    if (turnNoProgress > 30 && Math.Abs(off) < 110) return Block("Bearing away stalls: the bow isn't falling off.", heading, true);
                     return Demand = NavigationMath.Normalize(windFrom + previousSide * 120);
                 }
-                if (Math.Abs(NavigationMath.Delta(heading, target)) < 12 && speed > 0.35) return Complete(target, "Sails refilled; back on her course.");
+                if (Math.Abs(NavigationMath.Delta(heading, target)) < 12 && speed > 0.35) return Complete(target, "Sails refilled; back on its course.");
                 return Demand = target;
             }
             bool sternThrough = Side(windFrom, heading) != previousSide && Math.Abs(off) <= 155;
             if (!sternThrough)
             {
-                if (turnNoProgress > 30) return Block("The wear stalls: her heading isn't moving.", heading);
+                if (turnNoProgress > 30) return Block("The wear stalls: the heading isn't moving.", heading, true);
                 return Demand = NavigationMath.Normalize(heading + previousSide * 60);
             }
             if (Math.Abs(NavigationMath.Delta(heading, target)) < 12 && speed > 0.35) return Complete(target, "Wear done with forward steerage.");
@@ -10403,11 +11605,11 @@ namespace ShipwrightAndTransport.Sailing
         {
             State = PlainState; turning = stalled = 0; sinceTurn = 0;
             if (countOnCompletion) ++TackCount;
-            countOnCompletion = refill = false; Reason = reason;
+            countOnCompletion = refill = swingBack = false; Reason = reason;
             return Demand = target;
         }
 
-        private double Block(string reason, double heading) { State = Manoeuvre.Blocked; Reason = reason; return Demand = heading; }
+        private double Block(string reason, double heading, bool turnFailed = false) { State = Manoeuvre.Blocked; Reason = reason; TurnFailed = turnFailed; return Demand = heading; }
 
         // The side of the wind a heading lies on: +1 clockwise of it, -1 anticlockwise.
         public static int Side(double windFrom, double heading) => NavigationMath.Delta(windFrom, heading) < 0 ? -1 : 1;
@@ -10417,6 +11619,17 @@ namespace ShipwrightAndTransport.Sailing
         {
             double a = NavigationMath.Delta(windFrom, heading), b = NavigationMath.Delta(windFrom, course);
             return (a < 0) != (b < 0) && Math.Abs(a) + Math.Abs(b) < 180;
+        }
+
+        // A tack's turn (+1 clockwise) toward its `course` through the wind from `windFrom`: toward the course's side of the wind, the
+        // same before and after the bow crosses the wind's eye.
+        internal static int TackTurnSign(double windFrom, double course) => NavigationMath.Delta(windFrom, course) < 0 ? -1 : 1;
+
+        // The point `degrees` round a turning circle of `radius` from `p`, starting on `heading` and turning `sign` (+1 clockwise).
+        internal static RoutePoint ArcPoint(RoutePoint p, double heading, int sign, double radius, double degrees)
+        {
+            double h = heading * Math.PI / 180, r = degrees * Math.PI / 180, ahead = radius * Math.Sin(r), aside = sign * radius * (1 - Math.Cos(r));
+            return new RoutePoint((float)(p.x + Math.Sin(h) * ahead + Math.Cos(h) * aside), (float)(p.z + Math.Cos(h) * ahead - Math.Sin(h) * aside));
         }
 
         // A speed estimate for an angle off the wind, as a share of her best: nothing in her no-go, then decision 210's measured share
@@ -10434,6 +11647,53 @@ namespace ShipwrightAndTransport.Sailing
         // Way made good toward a bearing on a heading: the Polar speed times the cosine of the angle off the bearing.
         public static double Vmg(double heading, double bearing, double windFrom, double noGo) =>
             Polar(NavigationMath.Delta(windFrom, heading), noGo) * Math.Cos(NavigationMath.Delta(heading, bearing) * Math.PI / 180);
+        // The same with each heading's own apparent wind (HeadingWind).
+        public static double Vmg(double heading, double bearing, HeadingWind wind, double noGo) =>
+            Polar(wind.Off(heading), noGo) * Math.Cos(NavigationMath.Delta(heading, bearing) * Math.PI / 180);
+
+        // The true wind (the bearing it comes from, its speed) for the next Tick: with it, a heading on the other side of the apparent wind
+        // from the bow is judged by the apparent wind the ship would feel on it at ExpectedSpeed (HeadingWind); without it, by the apparent wind
+        // passed to Tick.
+        public void TrueWind(double from, double strength) { trueFrom = from; trueStrength = strength; }
+        private double trueFrom = double.NaN, trueStrength;
+        // The speed the ship is expected to sail a heading it isn't on at: its speed now, at least GatherSpeed (the speed it gathers way to).
+        public static double ExpectedSpeed(double speed) => Math.Max(speed, GatherSpeed);
+        // Each heading's apparent wind for the Tick running now.
+        private HeadingWind wind;
+    }
+
+    // The apparent wind a heading would have. A heading on `Side` of the apparent wind the ship feels now (the bow's side; 0: no heading is
+    // sailed) takes that wind (`Apparent`, the bearing it comes from). Any other, with the true wind known (`True`, the bearing it comes
+    // from; `Strength`, its speed), takes the apparent wind the ship would feel on it moving `Speed` ahead (UpwindLimits.ApparentAngle).
+    // Without the true wind every heading takes `Apparent`. Bearings may be in any frame (relative to the apparent wind: `Apparent` 0).
+    public struct HeadingWind
+    {
+        public readonly double Apparent, True, Strength, Speed;
+        public readonly int Side;
+        public readonly bool Known;
+
+        public HeadingWind(double apparent, double trueFrom, double strength, double speed, int side)
+        {
+            Apparent = apparent; True = trueFrom; Strength = strength; Speed = Math.Max(0, speed); Side = side;
+            Known = NavigationMath.Finite(apparent) && NavigationMath.Finite(trueFrom) && NavigationMath.Finite(strength) && NavigationMath.Finite(speed) && strength >= 0.1;
+        }
+
+        public static HeadingWind ApparentOnly(double apparent) => new HeadingWind(apparent, double.NaN, 0, 0, 0);
+
+        // Whether headings on `side` of the apparent wind take the apparent wind the ship feels now.
+        public bool Feels(int side) => !Known || side == 0 || Side != 0 && side == Side;
+
+        // The apparent wind's angle off `heading` (signed as NavigationMath.Delta(windFrom, heading): + the heading clockwise of the wind).
+        public double Off(double heading)
+        {
+            if (Feels(TackNavigator.Side(Apparent, heading))) return NavigationMath.Delta(Apparent, heading);
+            double t = NavigationMath.Delta(True, heading);
+            return Math.Sign(t) * UpwindLimits.ApparentAngle(Math.Abs(t), Strength, Speed);
+        }
+
+        // The heading `off` degrees off the apparent wind on `side` (+1 clockwise of it).
+        public double At(int side, double off) => Feels(side) ? NavigationMath.Normalize(Apparent + side * off)
+            : NavigationMath.Normalize(True + side * UpwindLimits.TrueAngle(off, Strength, Speed));
     }
 
     // ==== TrafficPrediction ====
@@ -10449,26 +11709,63 @@ namespace ShipwrightAndTransport.Sailing
 
         public static bool Moving(double vx, double vz) => NavigationMath.Finite(vx) && NavigationMath.Finite(vz) && vx * vx + vz * vz > MovingSpeed * MovingSpeed;
 
-        // Both vessels advance on the same clock. At the planned endpoint,
-        // continue checking arriving traffic for the remaining prediction time.
-        public static bool Intersects(RoutePoint from, RoutePoint to, double speed,
-            RoutePoint other, double otherVx, double otherVz, double radius, double seconds = 20)
+        // A hull's outline: a line along its heading from Aft behind its centre to Fore ahead of it, HalfBeam round it (m).
+        public readonly struct Hull
         {
-            if (!RoutePlanner.Finite(from) || !RoutePlanner.Finite(to) || !RoutePlanner.Finite(other) ||
-                !NavigationMath.Finite(speed) || speed < 0 || !NavigationMath.Finite(otherVx) ||
-                !NavigationMath.Finite(otherVz) || !NavigationMath.Finite(radius) || radius < 0 ||
+            public readonly double Fore, Aft, HalfBeam;
+            public Hull(double fore, double aft, double halfBeam) { Fore = fore; Aft = aft; HalfBeam = halfBeam; }
+        }
+
+        // A heading meets traffic when the hulls are predicted to come closer than TrafficMargin (m), looked at every SampleSeconds.
+        public const double TrafficMargin = 1, SampleSeconds = 0.5;
+
+        // LeastGap's `gap` and `when` meet traffic: under the margin later than now (least now: the hulls only draw apart along it).
+        public static bool Meets(double gap, double when) => gap < TrafficMargin && when > 0;
+
+        // Whether a meeting `when` s ahead takes the sails in: in a turn (no change of course) only within Voyage.StopSeconds, else always.
+        public static bool SailsIn(bool turning, double when) => !turning || when <= Voyage.StopSeconds;
+
+        // The least gap (m; under 0 where they overlap) between the ship's hull and another's over `seconds`, and `when` it falls (s).
+        // The ship moves along `from`-`to` at `speed` and stays at `to` once there; the other moves at its velocity; each keeps its heading.
+        public static double LeastGap(RoutePoint from, RoutePoint to, double speed, double heading, Hull own,
+            RoutePoint other, double otherVx, double otherVz, double otherHeading, Hull hull, out double when, double seconds = 20)
+        {
+            if (!RoutePlanner.Finite(from) || !RoutePlanner.Finite(to) || !RoutePlanner.Finite(other) || !NavigationMath.Finite(speed) || speed < 0 ||
+                !NavigationMath.Finite(heading) || !NavigationMath.Finite(otherVx) || !NavigationMath.Finite(otherVz) || !NavigationMath.Finite(otherHeading) ||
                 !NavigationMath.Finite(seconds) || seconds < 0)
-                throw new ArgumentException("Traffic prediction requires finite positions, velocities and nonnegative bounds.");
-            double dx = to.x - from.x, dz = to.z - from.z;
-            double distance = Math.Sqrt(dx * dx + dz * dz);
-            double travelTime = speed > 0 ? Math.Min(seconds, distance / speed) : 0;
-            double fraction = distance > 0 ? Math.Min(1, speed * travelTime / distance) : 0;
-            double ax = from.x - other.x, az = from.z - other.z;
-            double bx = ax + dx * fraction - otherVx * travelTime;
-            double bz = az + dz * fraction - otherVz * travelTime;
-            return NavigationMath.SegmentEntersRadius(ax, az, bx, bz, 0, 0, radius) ||
-                NavigationMath.SegmentEntersRadius(bx, bz,
-                    bx - otherVx * (seconds - travelTime), bz - otherVz * (seconds - travelTime), 0, 0, radius);
+                throw new ArgumentException("Traffic prediction requires finite positions, velocities and headings and nonnegative bounds.");
+            double dx = to.x - from.x, dz = to.z - from.z, distance = Math.Sqrt(dx * dx + dz * dz);
+            double wx = distance > 1e-6 ? dx / distance : 0, wz = distance > 1e-6 ? dz / distance : 0;
+            double h = heading * Math.PI / 180, ux = Math.Sin(h), uz = Math.Cos(h);
+            double oh = otherHeading * Math.PI / 180, ox = Math.Sin(oh), oz = Math.Cos(oh);
+            double least = double.PositiveInfinity; when = 0;
+            int steps = (int)Math.Ceiling(seconds / SampleSeconds);
+            for (int i = 0; i <= steps; i++)
+            {
+                double t = Math.Min(seconds, i * SampleSeconds), along = Math.Min(speed * t, distance);
+                double cx = from.x + wx * along, cz = from.z + wz * along, kx = other.x + otherVx * t, kz = other.z + otherVz * t;
+                double gap = SegmentGap(cx - ux * own.Aft, cz - uz * own.Aft, cx + ux * own.Fore, cz + uz * own.Fore,
+                    kx - ox * hull.Aft, kz - oz * hull.Aft, kx + ox * hull.Fore, kz + oz * hull.Fore) - own.HalfBeam - hull.HalfBeam;
+                if (gap < least) { least = gap; when = t; }
+            }
+            return least;
+        }
+
+        // The least distance between two segments in the plane (0 where they cross).
+        private static double SegmentGap(double ax, double az, double bx, double bz, double cx, double cz, double dx, double dz)
+        {
+            double Cross(double px, double pz, double qx, double qz, double rx, double rz) => (qx - px) * (rz - pz) - (qz - pz) * (rx - px);
+            if (Cross(cx, cz, dx, dz, ax, az) * Cross(cx, cz, dx, dz, bx, bz) < 0 && Cross(ax, az, bx, bz, cx, cz) * Cross(ax, az, bx, bz, dx, dz) < 0) return 0;
+            return Math.Min(Math.Min(PointSegment(ax, az, cx, cz, dx, dz), PointSegment(bx, bz, cx, cz, dx, dz)),
+                Math.Min(PointSegment(cx, cz, ax, az, bx, bz), PointSegment(dx, dz, ax, az, bx, bz)));
+        }
+
+        private static double PointSegment(double px, double pz, double ax, double az, double bx, double bz)
+        {
+            double sx = bx - ax, sz = bz - az, l = sx * sx + sz * sz;
+            double t = l > 0 ? Math.Max(0, Math.Min(1, ((px - ax) * sx + (pz - az) * sz) / l)) : 0;
+            double x = ax + t * sx - px, z = az + t * sz - pz;
+            return Math.Sqrt(x * x + z * z);
         }
     }
 
@@ -10483,10 +11780,11 @@ namespace ShipwrightAndTransport.Sailing
 
     internal sealed class TurnCircle
     {
-        // A sample counts while her helm's controller asks its full turn rate (HeadingController.FullRateSide; decision 225 (10): by the
-        // helm's size, 0.75 and more, the turn-rate helm gave it only while she turned under about 1 degree a second, circles of 86-172 m),
-        // with this much way on and this much turn (a steady heading says nothing of her circle).
-        internal const double LeastSpeed = 1.5, LeastRate = 0.5;
+        // A sample counts while the helm is HardHelm of full or more (a part helm's circle is wider than the hull turns), with this much
+        // way on and this much turn (a steady heading says nothing of her circle).
+        internal const double HardHelm = 0.9, LeastSpeed = 1.5, LeastRate = 0.5;
+        // The side the helm is hard over to (+1 starboard, -1 port; a negative helm turns the ship to starboard going ahead), else 0.
+        internal static int HardSide(double helm, double forward) => forward > 0 && Math.Abs(helm) >= HardHelm ? -Math.Sign(helm) : 0;
         // Her circle is the tightest steady one she makes: the KeepFraction-th of the last Kept samples, once there are Least of them
         // (a sample a second at most, Watch: Kept is her last 40 seconds of hard-helmed turns, Least 5 of them).
         internal const int Kept = 40, Least = 5;
@@ -10496,11 +11794,16 @@ namespace ShipwrightAndTransport.Sailing
         // length had cost lines the harbour check found with twice it): twice her hull's length without her bowsprit, her stored length
         // (Storage.LengthOf: the Brig 25.9 m, her length with her bowsprit, NavigationWater.Length, 29.0 m); twice that one until FY.
         internal const double DefaultLengths = 2, ReserveRate = 0.75;
+        // Unmeasured where the hull's physics can be read: Unity's circle for full helm (HullTurn.Circle) times SailsShare; planned at
+        // ReserveRate, 1.33 times the law, which holds 87 of the probe's 90 hard-over turns on 17 hulls (the others are turns the sails push
+        // against, until the hull's own circle is measured); set by the voyage.
+        internal const double SailsShare = 1.0;
+        internal double Physical = double.NaN;
 
         private readonly List<double> toward = new List<double>(), away = new List<double>();
 
-        // One moment of her sailing: her speed ahead (m/s), her turn rate (degrees a second, + to starboard), the side her helm's
-        // controller asks its full rate to (`asked`: +1 starboard, -1 port, 0 not at its full rate), and whether she turns toward the wind
+        // One moment of her sailing: her speed ahead (m/s), her turn rate (degrees a second, + to starboard), the side the helm is hard
+        // over to (`asked`: +1 starboard, -1 port, 0 not hard over), and whether she turns toward the wind
         // (luffing up) or away from it (bearing away). True when it counted. Only a turn her helm asks: a turn the other way (a spin
         // against her helm, decisions 176 and 178, or her swing being checked) is the wind's or her own momentum's, and its circle, often
         // tighter than her helm can turn her, isn't hers (Claude's review, 2026-10-12).
@@ -10530,20 +11833,21 @@ namespace ShipwrightAndTransport.Sailing
         }
 
         // The circle her line is planned with that way: her tightest at ReserveRate of her best turn rate (so her circle over
-        // ReserveRate, at least half her length); unmeasured, the other way's when it is measured, else DefaultLengths of `hull`, her
-        // hull's length without her bowsprit (decision 201 d; her length where that isn't known).
+        // ReserveRate, at least half her length); unmeasured, the other way's when it is measured, else the physical circle at ReserveRate
+        // too, else DefaultLengths of `hull`, her hull's length without her bowsprit (decision 201 d; her length where that isn't known).
         internal double Plan(bool towardWind, double length, double hull = double.NaN)
         {
             if (!(length > 0)) throw new ArgumentException("A hull needs a length.", nameof(length));
             double r = Tightest(towardWind);
             if (double.IsNaN(r)) r = Tightest(!towardWind);
+            if (double.IsNaN(r) && Physical > 0) r = Physical;
             return double.IsNaN(r) ? DefaultLengths * (hull > 0 ? hull : length) : Math.Max(length * 0.5, r / ReserveRate);
         }
 
         // The larger of the two ways' planned circles: for a check that doesn't know which way she turns.
         internal double PlanEither(double length, double hull = double.NaN) => Math.Max(Plan(true, length, hull), Plan(false, length, hull));
 
-        // When a voyage samples her circle (Claude's review, 2026-10-12): once her helm's controller has asked its full rate the same way
+        // When a voyage samples her circle (Claude's review, 2026-10-12): once the helm has been hard over the same way
         // for SteadySeconds (her swing built up: a turn's first seconds read a wider circle than she makes), and at most every SampleEvery
         // seconds. Her helm is steered every physics step: a sample each filled her Kept in under a second and made her measured in a
         // tenth, from whatever that moment held. One per voyage (her circle is her hull type's, which two ships of a type may share).
@@ -10552,7 +11856,7 @@ namespace ShipwrightAndTransport.Sailing
         {
             private int side;
             private double since = double.NegativeInfinity, next = double.NegativeInfinity;
-            // `asked` the side her helm's controller asks its full rate to (0: not), `now` the game's seconds: true when a sample is due.
+            // `asked` the side the helm is hard over to (0: not), `now` the game's seconds: true when a sample is due.
             internal bool Due(int asked, double now)
             {
                 int hard = Math.Sign(asked);
@@ -10562,6 +11866,9 @@ namespace ShipwrightAndTransport.Sailing
                 return true;
             }
         }
+
+        // The least speed ahead (m/s) at which the helm starts from the sails' helm.
+        internal const double ResponseSpeed = 0.5;
 
         internal string Describe(double length, double hull = double.NaN)
         {
@@ -10671,6 +11978,9 @@ namespace ShipwrightAndTransport.Sailing
         // turned onto the tow's line about her middle (no pull across her) and pulled along her length only, the more the
         // better she points along the line: all of the tow's speed on it, none from 60 degrees off it.
         internal const double BowFirstAngle = 60;
+        // A tow whose way lies more than 90 degrees off the bow as it begins: the stern leads, pulled astern along its length.
+        internal static bool SternLeads(double heading, double wayBearing) =>
+            NavigationMath.Finite(heading) && NavigationMath.Finite(wayBearing) && Math.Abs(NavigationMath.Delta(heading, wayBearing)) > 90;
         internal static double BowFirstShare(double offDegrees)
         {
             double cos = Math.Cos(Math.Abs(offDegrees) * Math.PI / 180), edge = Math.Cos(BowFirstAngle * Math.PI / 180);
@@ -10896,8 +12206,7 @@ namespace ShipwrightAndTransport.Sailing
         // The share of the wind each sail must receive at her closest angle, at sea and in port. Decision 214 (the user, 2026-10-13
         // evening: "make other sail to 0.5 also, so code is cleaner"; it was 0.6 at sea, 133, and 0.5 in port, 177; 212 had lowered it
         // for square sails alone, after the timing lab's Cog made 3.2 m/s with every sail at 61 degrees apparent, inside her square
-        // sail's 70 at 0.6): one least angle per sail. What stays of 177 is her close-hauled: in port right at her dead zone
-        // (TackNavigator.PortCloseMargin), at sea CloseMargin outside it.
+        // sail's 70 at 0.6): one least angle per sail.
         internal const double WindShare = 0.5;
         // In port (decision 177): in her harbour's chart, docking, or within `harbour` metres of her origin or destination berth.
         // Decision 184 (c): once in port, out of it only PortBand further out, so a beat across that line doesn't flip her in and
@@ -10945,9 +12254,17 @@ namespace ShipwrightAndTransport.Sailing
 
         internal struct SailLimit
         {
-            internal double Area, Minimum;
-            internal SailLimit(double area, double minimum) { Area = area; Minimum = minimum; }
+            // Draw: a square sail's least apparent angle at which some yard angle keeps it from being aback (NaN for other sails), which
+            // sets and furls it.
+            internal double Area, Minimum, Draw;
+            internal SailLimit(double area, double minimum, double draw = double.NaN) { Area = area; Minimum = minimum; Draw = draw; }
         }
+
+        // The share of the wind that counts for a square sail's Draw: any, so only a yard angle that would push the ship backwards (the
+        // wind on the sail's front face) fails; under 13 degrees of attack the game gives no force at all, neither drive nor drag.
+        internal const double AbackShare = 0;
+        // A square sail's Draw where its geometry can't be read: its closest angle off the bow, the wind along its yard braced fully.
+        internal static double SailAback(double closestOff) => NavigationMath.Clamp(closestOff, 0, 90);
 
         // The sail area drawing at limit `limit`: every sail whose own least angle is that or less.
         internal static double AreaWithin(IList<SailLimit> sails, double limit) => sails.Where(s => s.Minimum <= limit + 1e-6).Sum(s => Math.Max(0, s.Area));
@@ -10974,13 +12291,62 @@ namespace ShipwrightAndTransport.Sailing
         }
         internal static double SetSpeed(double area, double off, double minimum) => Math.Pow(Math.Max(0, area), AreaPower) * SpeedShare(off, minimum);
 
+        // The speed (m/s) a set (`area` drawing, its least angle `minimum`) is expected to make on a heading `trueOff` degrees off a true
+        // wind of `strength`, at `perUnit` m/s per unit of SetSpeed: the speed whose own apparent angle gives that speed back (the apparent
+        // wind comes forward as the speed rises, so the speed SetSpeed gives falls as it rises; found by halving), at least
+        // TackNavigator.GatherSpeed (TackNavigator.ExpectedSpeed's floor).
+        internal static double ExpectedSetSpeed(double perUnit, double area, double minimum, double trueOff, double strength)
+        {
+            double top = perUnit * Math.Pow(Math.Max(0, area), AreaPower), low = TackNavigator.GatherSpeed, high = Math.Max(low, top), t = Math.Abs(trueOff);
+            for (int i = 0; i < 12 && high - low > 0.01; i++)
+            {
+                double mid = (low + high) / 2;
+                if (top * SpeedShare(ApparentAngle(t, strength, mid), minimum) >= mid) low = mid; else high = mid;
+            }
+            return low;
+        }
+
+        // The speed limit `minimum` is judged at: its set's expected speed straight at the guide point (`guideTrueOff` off the true wind)
+        // when the guide point lies outside its close-hauled at that speed, else its speed close-hauled (the apparent wind there is at
+        // the close-hauled angle whatever the speed).
+        internal static double LimitSpeed(double perUnit, double area, double minimum, double guideTrueOff, double strength, double margin)
+        {
+            double close = TackNavigator.BeatOff(minimum, margin), atGuide = ExpectedSetSpeed(perUnit, area, minimum, guideTrueOff, strength);
+            if (ApparentAngle(Math.Abs(guideTrueOff), strength, atGuide) >= close) return atGuide;
+            return Math.Max(TackNavigator.GatherSpeed, perUnit * SetSpeed(area, close, minimum));
+        }
+
+        // The true wind (`TrueFrom`, in the frame the angles are taken in: the apparent wind the ship feels at 0; `Strength` m/s) and the
+        // ship's speed per unit of SetSpeed now (`PerUnit`, SailControlAdapters.PerUnit), so that each limit and each sail outside the
+        // limit is judged at the speed its own sails would make, not at the speed the ship has with the sails set now. Not Known: every
+        // limit on the one wind given, as before.
+        internal readonly struct SpeedJudge
+        {
+            internal readonly double TrueFrom, Strength, PerUnit;
+            internal SpeedJudge(double trueFrom, double strength, double perUnit) { TrueFrom = trueFrom; Strength = strength; PerUnit = perUnit; }
+            internal bool Known => NavigationMath.Finite(TrueFrom) && NavigationMath.Finite(Strength) && Strength >= 0.1 && NavigationMath.Finite(PerUnit) && PerUnit >= 0;
+            // The speed limit `minimum` (`area` drawing at it) is judged at toward a guide point `guideOff` off the apparent wind.
+            internal double LimitSpeed(double area, double minimum, double guideOff, double margin) =>
+                UpwindLimits.LimitSpeed(PerUnit, area, minimum, NavigationMath.Delta(TrueFrom, guideOff), Strength, margin);
+            // Every heading by the apparent wind at `speed`.
+            internal HeadingWind At(double speed) => new HeadingWind(0, TrueFrom, Strength, speed, 0);
+            // The apparent angle on a heading `off` the apparent wind now, at the speed a set (`area`, `minimum`) would make on it.
+            internal double SetOff(double off, double area, double minimum)
+            {
+                double t = Math.Abs(NavigationMath.Delta(TrueFrom, off));
+                return ApparentAngle(t, Strength, ExpectedSetSpeed(PerUnit, area, minimum, t, Strength));
+            }
+        }
+
         // Her way made good toward her guide point (`guideOff`: its bearing's angle off the apparent wind) at limit `minimum` with
         // `area` drawing: straight at it when she can, else close-hauled (TackNavigator.BeatOff), at SetSpeed there.
-        internal static double ModeVmg(double guideOff, double minimum, double area, double margin = TackNavigator.CloseMargin)
+        // `wind`: each heading's apparent wind, in angles off the apparent wind the ship feels now (default: that wind for every heading).
+        internal static double ModeVmg(double guideOff, double minimum, double area, double margin = TackNavigator.CloseMargin, HeadingWind wind = default)
         {
             if (!NavigationMath.Finite(guideOff) || !NavigationMath.Finite(minimum) || !NavigationMath.Finite(area)) throw new ArgumentException("Invalid sail mode data.");
-            double g = Math.Min(180, Math.Abs(guideOff)), off = Math.Max(g, TackNavigator.BeatOff(minimum, margin));
-            return SetSpeed(area, off, minimum) * Math.Cos((off - g) * Math.PI / 180);
+            double g = NavigationMath.Delta(0, guideOff), off = Math.Abs(wind.Off(g)), close = TackNavigator.BeatOff(minimum, margin);
+            if (off >= close) return SetSpeed(area, off, minimum);
+            return SetSpeed(area, close, minimum) * Math.Cos(NavigationMath.Delta(wind.At(g < 0 ? -1 : 1, close), g) * Math.PI / 180);
         }
 
         // Her best way made good toward her guide point at limit `minimum` with `area` drawing, among the headings she can sail
@@ -10991,30 +12357,32 @@ namespace ShipwrightAndTransport.Sailing
         // of the bow's angle, as `guideOff`'s sign; -1 port; 0 either): only headings on that side of the wind.
         internal const double TerrainStep = 10;
 
-        internal static double BestVmg(double guideOff, double minimum, double area, Func<double, bool> clear, int side = 0, double margin = TackNavigator.CloseMargin) =>
-            BestVmg(guideOff, minimum, area, clear, out _, side, margin);
+        // `wind` (ModeVmg's): a heading on a side the ship doesn't feel is listed where its own apparent wind lies close-hauled and beyond.
+        internal static double BestVmg(double guideOff, double minimum, double area, Func<double, bool> clear, int side = 0, double margin = TackNavigator.CloseMargin, HeadingWind wind = default) =>
+            BestVmg(guideOff, minimum, area, clear, out _, side, margin, wind);
         // The same, and `heading`: the clear heading it is made on (its angle off the apparent wind; NaN when none).
-        internal static double BestVmg(double guideOff, double minimum, double area, Func<double, bool> clear, out double heading, int side = 0, double margin = TackNavigator.CloseMargin)
+        internal static double BestVmg(double guideOff, double minimum, double area, Func<double, bool> clear, out double heading, int side = 0, double margin = TackNavigator.CloseMargin, HeadingWind wind = default)
         {
             heading = double.NaN;
             if (!NavigationMath.Finite(guideOff) || !NavigationMath.Finite(minimum) || !NavigationMath.Finite(area)) throw new ArgumentException("Invalid sail mode data.");
             double close = TackNavigator.BeatOff(minimum, margin), g = NavigationMath.Delta(0, guideOff);
             var headings = new List<double>();
-            if (Math.Abs(g) >= close) headings.Add(g);
+            if (Math.Abs(wind.Off(g)) >= close) headings.Add(g);
             foreach (int s in new[] { 1, -1 })
-                for (double a = close; a <= 180 + 1e-9; a += TerrainStep) headings.Add(s * Math.Min(a, 180));
-            foreach (var off in headings.Where(h => side == 0 || h * side > 0).Select(h => new { h, v = SetSpeed(area, Math.Abs(h), minimum) * Math.Cos(NavigationMath.Delta(h, g) * Math.PI / 180) })
+                for (double a = close; a <= 180 + 1e-9; a += TerrainStep)
+                    headings.Add(wind.Feels(s) ? s * Math.Min(a, 180) : NavigationMath.Delta(0, wind.At(s, Math.Min(a, 180))));
+            foreach (var off in headings.Where(h => side == 0 || h * side > 0).Select(h => new { h, v = SetSpeed(area, Math.Abs(wind.Off(h)), minimum) * Math.Cos(NavigationMath.Delta(h, g) * Math.PI / 180) })
                 .OrderByDescending(x => x.v))
                 if (clear == null || clear(off.h)) { heading = off.h; return off.v; }
             return double.NegativeInfinity;
         }
 
         // Whether at limit `minimum` she can sail straight at her guide point (`guideOff` off the apparent wind) and its way is clear.
-        internal static bool Lays(double guideOff, double minimum, Func<double, bool> clear, double margin)
+        internal static bool Lays(double guideOff, double minimum, Func<double, bool> clear, double margin, HeadingWind wind = default)
         {
             if (!NavigationMath.Finite(guideOff) || !NavigationMath.Finite(minimum)) return false;
             double g = NavigationMath.Delta(0, guideOff);
-            return Math.Abs(g) >= TackNavigator.BeatOff(minimum, margin) && (clear == null || clear(g));
+            return Math.Abs(wind.Off(g)) >= TackNavigator.BeatOff(minimum, margin) && (clear == null || clear(g));
         }
 
         // The limit to sail at: of her sails' least angles, the one with the most way made good among clear headings; `current`
@@ -11029,20 +12397,25 @@ namespace ShipwrightAndTransport.Sailing
         // that let her sail straight at her guide point, its way clear, come first (the most way made good among them); when none
         // can, the closest-winded limit's best clear heading (on her side, else either), with the most sail that can sail it: on a beat
         // her closest-winded sails alone, pointing highest in the least room. At sea as above.
-        internal static double ChooseLimit(IList<SailLimit> sails, double guideOff, double current, Func<double, bool> clear = null, int side = 0, double margin = TackNavigator.CloseMargin, bool inPort = false)
+        // `wind`: each heading's apparent wind (BestVmg's). `judge` known: each limit's headings instead by the apparent wind at that
+        // limit's own expected speed (SpeedJudge.LimitSpeed), so the choice doesn't turn on the speed the sails set now give.
+        internal static double ChooseLimit(IList<SailLimit> sails, double guideOff, double current, Func<double, bool> clear = null, int side = 0, double margin = TackNavigator.CloseMargin, bool inPort = false,
+            HeadingWind wind = default, SpeedJudge judge = default)
         {
             if (sails == null || sails.Count == 0) throw new ArgumentException("A rig needs sails for its upwind limit.");
             var limits = sails.Select(s => s.Minimum).Distinct().OrderBy(m => m).ToList();
+            var winds = LimitWinds(sails, limits, guideOff, margin, wind, judge);
+            HeadingWind W(double m) => winds[limits.FindIndex(x => Math.Abs(x - m) < 1e-6)];
             if (inPort)
             {
                 double g = NavigationMath.Delta(0, guideOff);
-                var laying = limits.Where(m => Lays(g, m, clear, margin)).ToList();
+                var laying = limits.Where(m => Lays(g, m, clear, margin, W(m))).ToList();
                 if (laying.Count > 0)
                 {
                     double pick = double.NaN, pickVmg = double.NegativeInfinity;
                     foreach (double m in laying)
                     {
-                        double v = ModeVmg(g, m, AreaWithin(sails, m), margin);
+                        double v = ModeVmg(g, m, AreaWithin(sails, m), margin, W(m));
                         if (NavigationMath.Finite(current) && Math.Abs(m - current) < 1e-6) v *= 1 + ModeHysteresis;
                         if (v > pickVmg + 1e-9) { pick = m; pickVmg = v; }
                     }
@@ -11053,8 +12426,8 @@ namespace ShipwrightAndTransport.Sailing
                 foreach (int s in side != 0 ? new[] { side, 0 } : new[] { 0 })
                     foreach (double m in limits)
                     {
-                        if (double.IsNegativeInfinity(BestVmg(guideOff, m, AreaWithin(sails, m), clear, out double h, s, margin))) continue;
-                        return limits.Where(w => TackNavigator.BeatOff(w, margin) <= Math.Abs(h) + 1e-6).Max();
+                        if (double.IsNegativeInfinity(BestVmg(guideOff, m, AreaWithin(sails, m), clear, out double h, s, margin, W(m)))) continue;
+                        return limits.Where(w => TackNavigator.BeatOff(w, margin) <= Math.Abs(W(w).Off(h)) + 1e-6).Max();
                     }
                 return limits[limits.Count - 1];
             }
@@ -11062,25 +12435,93 @@ namespace ShipwrightAndTransport.Sailing
             bool hasCurrent = NavigationMath.Finite(current) && limits.Any(m => Math.Abs(m - current) < 1e-6);
             if (hasCurrent)
             {
-                double v = BestVmg(guideOff, current, AreaWithin(sails, current), clear, 0, margin);
+                double v = BestVmg(guideOff, current, AreaWithin(sails, current), clear, 0, margin, W(current));
                 if (!double.IsNegativeInfinity(v)) { best = current; bestVmg = v >= 0 ? v * (1 + ModeHysteresis) : v / (1 + ModeHysteresis); }
                 else side = 0;
             }
             foreach (double m in limits)
             {
                 if (NavigationMath.Finite(best) && Math.Abs(m - best) < 1e-6) continue;
-                double v = BestVmg(guideOff, m, AreaWithin(sails, m), clear, side, margin);
+                double v = BestVmg(guideOff, m, AreaWithin(sails, m), clear, side, margin, W(m));
                 if (v > bestVmg + 1e-9) { best = m; bestVmg = v; }
             }
-            if (!NavigationMath.Finite(best) && side != 0) return ChooseLimit(sails, guideOff, double.NaN, clear, 0, margin);
+            if (!NavigationMath.Finite(best) && side != 0) return ChooseLimit(sails, guideOff, double.NaN, clear, 0, margin, false, wind, judge);
             // No limit has a clear heading: the widest, with every sail.
             return NavigationMath.Finite(best) ? best : limits[limits.Count - 1];
         }
+
+        // Each of `limits`' winds, in its order: `wind` for all without a known `judge`, else the apparent wind at the limit's own expected speed.
+        internal static HeadingWind[] LimitWinds(IList<SailLimit> sails, IList<double> limits, double guideOff, double margin, HeadingWind wind, SpeedJudge judge)
+        {
+            var winds = new HeadingWind[limits.Count];
+            for (int i = 0; i < limits.Count; i++)
+                winds[i] = judge.Known ? judge.At(judge.LimitSpeed(AreaWithin(sails, limits[i]), limits[i], guideOff, margin)) : wind;
+            return winds;
+        }
+
+        // A stretch of the harbour line ahead (decision 198): `headings`, each leg's heading as an angle off the apparent wind now (+ to
+        // starboard, as `guideOff`), and `lengths`, each leg's length (m). On the line in port each limit is judged by the stretch the
+        // 60 s hold covers, not by the guide point one length ahead, whose bearing swings round each of the line's turns.
+
+        // Whether limit `minimum` sails every leg of the stretch `beyond` degrees or more outside its close-hauled in `wind`.
+        internal static bool LaysStretch(IList<double> headings, double minimum, double margin, HeadingWind wind, double beyond = 0)
+        {
+            if (headings == null || headings.Count == 0 || !NavigationMath.Finite(minimum)) return false;
+            double close = TackNavigator.BeatOff(minimum, margin) + beyond;
+            for (int i = 0; i < headings.Count; i++) if (Math.Abs(wind.Off(headings[i])) < close) return false;
+            return true;
+        }
+
+        // The time to sail the stretch at limit `minimum` with `area` drawing: each leg's length over SetSpeed on it (relative units).
+        internal static double StretchTime(IList<double> headings, IList<double> lengths, double minimum, double area, HeadingWind wind)
+        {
+            double time = 0;
+            for (int i = 0; i < headings.Count; i++)
+            {
+                double v = SetSpeed(area, Math.Abs(wind.Off(headings[i])), minimum);
+                if (v <= 0) return double.PositiveInfinity;
+                time += lengths[i] / v;
+            }
+            return time;
+        }
+
+        // Each of `limits`' winds for a stretch, in its order: `wind` without a known `judge`, else the apparent wind at the speed the
+        // limit's set makes on the stretch's leg nearest the true wind (the leg that decides whether it lays the stretch).
+        internal static HeadingWind[] StretchWinds(IList<SailLimit> sails, IList<double> limits, IList<double> headings, HeadingWind wind, SpeedJudge judge)
+        {
+            var winds = new HeadingWind[limits.Count];
+            double nearest = double.PositiveInfinity;
+            if (judge.Known) for (int i = 0; i < headings.Count; i++) nearest = Math.Min(nearest, Math.Abs(NavigationMath.Delta(judge.TrueFrom, headings[i])));
+            for (int i = 0; i < limits.Count; i++)
+                winds[i] = judge.Known && NavigationMath.Finite(nearest)
+                    ? judge.At(ExpectedSetSpeed(judge.PerUnit, AreaWithin(sails, limits[i]), limits[i], nearest, judge.Strength)) : wind;
+            return winds;
+        }
+
+        // The limit for a stretch: among `limits` (with `winds`, StretchWinds') those that lay every leg, the one that sails it in the
+        // least time, `current` kept unless another is ModeHysteresis quicker; NaN when none lays it. With a `current`, another limit must
+        // lay it `setAgain` beyond its close-hauled (as Draws), so a leg near that line doesn't flip the choice as the stretch moves on.
+        internal static double ChooseForStretch(IList<SailLimit> sails, IList<double> limits, HeadingWind[] winds, IList<double> headings, IList<double> lengths, double current, double margin,
+            double setAgain = SetAgain)
+        {
+            double pick = double.NaN, pickTime = double.PositiveInfinity;
+            bool hasCurrent = NavigationMath.Finite(current);
+            for (int i = 0; i < limits.Count; i++)
+            {
+                double m = limits[i];
+                bool held = hasCurrent && Math.Abs(m - current) < 1e-6;
+                if (!LaysStretch(headings, m, margin, winds[i], held || !hasCurrent ? 0 : setAgain)) continue;
+                double time = StretchTime(headings, lengths, m, AreaWithin(sails, m), winds[i]);
+                if (held) time /= 1 + ModeHysteresis;
+                if (time < pickTime - 1e-9) { pick = m; pickTime = time; }
+            }
+            return pick;
+        }
         // Whether a sail whose own least angle is `minimum` is set with the apparent wind `apparentOff` off her bow, sailing at
-        // `limit`: always within the limit; else while the wind is outside its close-hauled (TackNavigator.BeatOff), SetAgain
-        // further before it is set again once furled.
-        internal static bool Draws(double apparentOff, double minimum, double limit, bool setNow, double margin = TackNavigator.CloseMargin) =>
-            minimum <= limit + 1e-6 || Math.Abs(apparentOff) >= TackNavigator.BeatOff(minimum, margin) + (setNow ? 0 : SetAgain);
+        // `limit`: always within the limit; else while the wind is outside its close-hauled (TackNavigator.BeatOff), or outside
+        // `draw` where it has one (a square sail), SetAgain further before it is set again once furled.
+        internal static bool Draws(double apparentOff, double minimum, double limit, bool setNow, double margin = TackNavigator.CloseMargin, double draw = double.NaN) =>
+            minimum <= limit + 1e-6 || Math.Abs(apparentOff) >= (NavigationMath.Finite(draw) ? draw : TackNavigator.BeatOff(minimum, margin)) + (setNow ? 0 : SetAgain);
         // The apparent wind's angle off her bow for the true wind's, her moving `speed` along her heading in a `wind` (m/s).
         internal static double ApparentAngle(double trueAngle, double wind, double speed)
         {
@@ -11097,14 +12538,17 @@ namespace ShipwrightAndTransport.Sailing
             return Math.Min(179, apparent + (s >= 1 ? 90 : Math.Asin(s) * 180 / Math.PI));
         }
 
-        // The steering's guard: a demanded heading closer to the apparent wind than `minimum` is put on the edge of that zone, on
-        // the side her bow is on.
-        internal static double Guard(double demand, double heading, double apparentFrom, double minimum)
+        // The steering's guard: a heading order closer to the apparent wind than `minimum` is put on the edge of that zone on `side` (the
+        // side the course chooser holds; 0: the bow's). An order whose short turn from the bow crosses the wind's eye is not steered:
+        // `handBack` is set and the bow holds its own side (its heading, or the zone's edge on its side). An order round the stern passes.
+        internal static double Guard(double demand, double heading, double apparentFrom, double minimum, int side, out bool handBack)
         {
-            double off = NavigationMath.Delta(apparentFrom, demand);
-            if (Math.Abs(off) >= minimum) return NavigationMath.Normalize(demand);
-            int side = NavigationMath.Delta(apparentFrom, heading) < 0 ? -1 : 1;
-            return NavigationMath.Normalize(apparentFrom + side * minimum);
+            int bow = TackNavigator.Side(apparentFrom, heading);
+            double steered = Math.Abs(NavigationMath.Delta(apparentFrom, demand)) >= minimum ? NavigationMath.Normalize(demand)
+                : NavigationMath.Normalize(apparentFrom + (side != 0 ? side : bow) * minimum);
+            handBack = TackNavigator.CrossesEye(heading, steered, apparentFrom);
+            if (!handBack) return steered;
+            return Math.Abs(NavigationMath.Delta(apparentFrom, heading)) >= minimum ? NavigationMath.Normalize(heading) : NavigationMath.Normalize(apparentFrom + bow * minimum);
         }
     }
 
@@ -11190,7 +12634,7 @@ namespace ShipwrightAndTransport.Sailing
         internal float Top(int i) => top[i];
         // Decision 195: the water cells within `radius` of `p` closed (a way she failed by); how many. Decision 201 (b): none within
         // `keepRadius` of `keep` (her approach point stays open).
-        internal int CloseAround(RoutePoint p, double radius, RoutePoint keep = default(RoutePoint), double keepRadius = 0)
+        internal int CloseAround(RoutePoint p, double radius, RoutePoint keep = default(RoutePoint), double keepRadius = 0, List<int> record = null)
         {
             int closed = 0, reach = (int)Math.Ceiling(radius / Cell) + 1, x0 = (int)Math.Floor((p.x - OriginX) / Cell), z0 = (int)Math.Floor((p.z - OriginZ) / Cell);
             for (int z = Math.Max(0, z0 - reach); z <= Math.Min(Height - 1, z0 + reach); z++)
@@ -11200,8 +12644,15 @@ namespace ShipwrightAndTransport.Sailing
                     if (!water[i] || RoutePoint.Distance(p, Centre(i)) > radius) continue;
                     if (keepRadius > 0 && RoutePoint.Distance(keep, Centre(i)) <= keepRadius) continue;
                     water[i] = fits[i] = false; closed++;
+                    record?.Add(i);
                 }
             return closed;
+        }
+
+        // Cells closed by CloseAround (`record`) open again; the next flood counts them.
+        internal void Reopen(List<int> cells)
+        {
+            foreach (int i in cells) fits[i] = true;
         }
 
         // Decision 195 (b) leaving, and 201 (b) arriving: her chart's way down from `from` closed: the water cells within `radius` of each
@@ -11277,21 +12728,23 @@ namespace ShipwrightAndTransport.Sailing
         // would sail within `windBeat` degrees of the true wind (`windFrom`) is a beat and costs BeatFactor times its length, or
         // NarrowBeatFactor where the water's clearance is under `narrowClearance` (a channel under about 3 of her lengths wide, too
         // narrow to tack in); reaching and running cost their length. NaN: no wind counted.
-        internal const double BeatFactor = 1.4, NarrowBeatFactor = 3;
-        private double windFrom = double.NaN, windBeat, narrowClearance;
+        // `wideFactor`: a beat's cost in wider water, WearBeatFactor for a hull that wears to change sides (each change of side a wear's
+        // advance downwind).
+        internal const double BeatFactor = 1.4, NarrowBeatFactor = 3, WearBeatFactor = 2;
+        private double windFrom = double.NaN, windBeat, narrowClearance, beatFactor = BeatFactor;
         // Decision 193 (amended 2026-10-12): `narrowFactor`, a beat's cost where too narrow to tack in (NarrowBeatFactor when 0).
         private double narrowBeatFactor = NarrowBeatFactor;
-        internal void SetWind(double from, double beat, double narrow, double narrowFactor = 0)
+        internal void SetWind(double from, double beat, double narrow, double narrowFactor = 0, double wideFactor = BeatFactor)
         {
-            if (!NavigationMath.Finite(from) || !NavigationMath.Finite(beat) || !NavigationMath.Finite(narrow) || beat <= 0 || beat >= 90 || narrow < 0)
+            if (!NavigationMath.Finite(from) || !NavigationMath.Finite(beat) || !NavigationMath.Finite(narrow) || beat <= 0 || beat >= 90 || narrow < 0 || !(wideFactor >= 1))
                 throw new ArgumentException("Invalid chart wind.");
-            windFrom = NavigationMath.Normalize(from); windBeat = beat; narrowClearance = narrow;
+            windFrom = NavigationMath.Normalize(from); windBeat = beat; narrowClearance = narrow; beatFactor = wideFactor;
             narrowBeatFactor = narrowFactor > 0 ? narrowFactor : NarrowBeatFactor;
         }
         internal double WindFrom => windFrom;
         // The wind's factor for a step she sails on `heading` from a cell of clearance `clear`.
         internal double WindFactor(double heading, double clear) => WindFactor(Beats(heading), clear);
-        private double WindFactor(bool beat, double clear) => !beat ? 1 : clear < narrowClearance ? narrowBeatFactor : BeatFactor;
+        private double WindFactor(bool beat, double clear) => !beat ? 1 : clear < narrowClearance ? narrowBeatFactor : beatFactor;
         private bool Beats(double heading) => !double.IsNaN(windFrom) && Math.Abs(NavigationMath.Delta(windFrom, heading)) < windBeat;
         // A step's cost from a cell, as the flood counts it: its length, more near what her hull doesn't fit, more where the water under
         // her keel is shallow (decision 198 g), more into the wind (decision 163; `heading`: the way she sails it, from `from` toward the
@@ -11534,7 +12987,7 @@ namespace ShipwrightAndTransport.Sailing
 
         internal void NeedBegin(ChartDepth judged)
         {
-            if (!judged.Known) throw new ArgumentException("Her need of the sea needs her keel.", nameof(judged));
+            if (!judged.Known) throw new ArgumentException("Its need of the sea needs its keel.", nameof(judged));
             needDepth = judged;
             if (nextNeed == null) nextNeed = new float[Count];
             if (needWork == null) needWork = new CellHeap(Count); else needWork.Clear();
@@ -11703,7 +13156,7 @@ namespace ShipwrightAndTransport.Sailing
                 foreach (double a in axis)
                     if (!Room(cx + a * sx, cz + a * sz, want, judged))
                     {
-                        why = (back > 0 ? back.ToString("F0") + " m back on her run-in, " : "") + "her point " + a.ToString("F1") + " m along her at (" +
+                        why = (back > 0 ? back.ToString("F0") + " m back on its run-in, " : "") + "its point " + a.ToString("F1") + " m along it at (" +
                             (cx + a * sx).ToString("F0") + ", " + (cz + a * sz).ToString("F0") + ") has under " + want.ToString("F1") + " m of room";
                         return false;
                     }
@@ -11716,13 +13169,22 @@ namespace ShipwrightAndTransport.Sailing
         // first point `within` metres or less by water from her goal, the chart's last if none; `heading` down the way there (toward the
         // point EntryLook metres on; NaN where the way ends there). Null where the flood doesn't reach `from`.
         internal const double EntryLook = 24;
-        internal RoutePoint? EntryDown(RoutePoint from, double within, out double heading)
+        // With `setUp` and `narrow`: the point `setUp` metres back along the way from its first cell under `narrow` clearance, where
+        // that point lies further out than the one `within` by water and is itself in water at least `narrow` clear.
+        internal RoutePoint? EntryDown(RoutePoint from, double within, out double heading, double setUp = 0, double narrow = 0)
         {
             heading = double.NaN;
             var down = Descent(from, 1e7);
             if (down.Count == 0) return null;
             int at = down.FindIndex(q => DistanceFrom(q) <= within);
             if (at < 0) at = down.Count - 1;
+            int mouth = setUp > 0 && narrow > 0 ? down.FindIndex(q => ClearanceAt(IndexOf(q)) < narrow) : -1;
+            if (mouth > 0)
+            {
+                int k = mouth;
+                for (double back = 0; k > 0 && back < setUp; k--) back += RoutePoint.Distance(down[k - 1], down[k]);
+                if (k < at && ClearanceAt(IndexOf(down[k])) >= narrow) at = k;
+            }
             int next = at;
             double along = 0;
             while (next < down.Count - 1 && along < EntryLook) { along += RoutePoint.Distance(down[next], down[next + 1]); next++; }
@@ -11861,6 +13323,7 @@ namespace ShipwrightAndTransport.Sailing
         public static RigSnapshot Scan(BoatContext boat)
         {
             var result = new RigSnapshot();
+            Mast[] masts = null;
             var sails = boat.Root.GetComponentsInChildren<Sail>(true)
                 // Vanilla still equips active legacy sails (obsolete=true) on
                 // fresh Emerald ships. Validate their real controls normally.
@@ -11915,9 +13378,9 @@ namespace ShipwrightAndTransport.Sailing
                         owners[rope] = primary;
                         if (!result.Winches.ContainsKey(rope))
                         {
-                            var stand = UnwinchedBrace(primary, rope, result);
+                            var stand = UnwinchedBrace(primary, rope, result, masts ?? (masts = boat.Root.GetComponentsInChildren<Mast>(true)), out string unwinched);
                             if (stand) result.Unwinched[rope] = stand;
-                            else result.Errors.Add(primary.name + ": sheet has no winch.");
+                            else result.Errors.Add(primary.name + ": sheet has no winch (" + unwinched + ").");
                         }
                         if (rope is RopeControllerSailAngle a)
                         {
@@ -11954,16 +13417,25 @@ namespace ShipwrightAndTransport.Sailing
         // braces with no winch, the topsail above holding the mast's brace winches. Only in that pattern is such a brace set by her sailor
         // directly, at the rate of the winch: a square sail with no mirror whose brace no winch holds, while the same side's brace winch
         // of its own mast holds that side's brace of another square sail with no mirror on that mast. That winch, else null.
-        internal static GPButtonRopeWinch UnwinchedBrace(Sail primary, RopeController rope, RigSnapshot result)
+        // `masts`: the ship's masts; a sail's mast is the one whose sails list holds it (Mast.AttachSail), else the one above it.
+        // `why`: the pattern's first condition that failed, for the scan's error.
+        internal static GPButtonRopeWinch UnwinchedBrace(Sail primary, RopeController rope, RigSnapshot result, Mast[] masts, out string why)
         {
-            if (!primary || !primary.squareSail || primary.GetComponent<SquareTopsailAngleMirror>() || !(rope is RopeControllerSailAngleSquare brace)) return null;
-            var mast = primary.GetComponentInParent<Mast>();
-            if (!mast) return null;
+            why = null;
+            Mast MastOf(Sail s) => masts.FirstOrDefault(m => m && m.sails != null && m.sails.Contains(s.gameObject)) ?? s.GetComponentInParent<Mast>();
+            if (!primary || !primary.squareSail || primary.GetComponent<SquareTopsailAngleMirror>() || !(rope is RopeControllerSailAngleSquare brace))
+            { why = "not a square sail's brace without a mirror (" + (rope ? rope.GetType().Name : "no rope") + ")"; return null; }
+            var mast = MastOf(primary);
+            if (!mast) { why = "on no mast"; return null; }
             var winches = brace.side == RopeControllerSailAngleSquare.WinchSide.left ? mast.leftAngleWinch : mast.rightAngleWinch;
             var winch = winches != null && winches.Length > 0 ? winches[0] : null;
-            if (!winch || !(winch.rope is RopeControllerSailAngleSquare held) || held == brace || held.side != brace.side || !result.Winches.ContainsKey(held)) return null;
+            if (!winch) { why = "mast " + mast.name + " has no " + brace.side + " brace winch (" + (winches == null ? "none" : winches.Length.ToString()) + ")"; return null; }
+            var held = winch.rope as RopeControllerSailAngleSquare;
+            if (!held || held == brace || held.side != brace.side || !result.Winches.ContainsKey(held))
+            { why = "mast " + mast.name + "'s " + brace.side + " brace winch holds " + (winch.rope ? winch.rope.name + " (" + winch.rope.GetType().Name + ")" : "no rope") + (held && !result.Winches.ContainsKey(held) ? ", not a winch of this rig" : ""); return null; }
             var other = held.squareAngleMaster ? held.squareAngleMaster.GetComponent<Sail>() : null;
-            if (!other || other == primary || !other.squareSail || other.GetComponent<SquareTopsailAngleMirror>() || other.GetComponentInParent<Mast>() != mast) return null;
+            if (!other || other == primary || !other.squareSail || other.GetComponent<SquareTopsailAngleMirror>() || MastOf(other) != mast)
+            { why = "the winch's brace is of " + (other ? other.name + (other.GetComponent<SquareTopsailAngleMirror>() ? " (a topsail with a mirror)" : "") + (MastOf(other) != mast ? " (another mast)" : "") : "no sail"); return null; }
             return winch;
         }
 
@@ -12102,10 +13574,8 @@ namespace ShipwrightAndTransport.Sailing
         private readonly RigSnapshot rig;
         private readonly BoatContext boat;
         private readonly Dictionary<RopeController, float> targets = new Dictionary<RopeController, float>();
-        internal bool Emergency;
         private float plannedDeployment;
         private float deploymentLimit=1;
-        private Sail emergencySail;
         private readonly List<TrimSample> trimSamples = new List<TrimSample>(360);
 
         // Decision 126 through the sail (the user, 2026-10-10: a backed sail, not a push): +1 sets every sail for the turning
@@ -12117,6 +13587,8 @@ namespace ShipwrightAndTransport.Sailing
         // Decision 155, backing: every sail set (none furled for decision 153's limit), each square sail braced for the most push astern
         // the game's force on it gives (its Forward most negative, aback), the others for the turning moment toward TurnSide.
         internal bool Astern;
+        // Astern with no turn (a hold's stop): the square sails backed, the others furled.
+        internal bool Stopping => Astern && TurnSide == 0;
         private bool plannedAstern;
         internal double TurnMoment { get; private set; }
         private int plannedTurnSide;
@@ -12133,7 +13605,7 @@ namespace ShipwrightAndTransport.Sailing
         // Decision 214: one least angle per sail, at UpwindLimits.WindShare, at sea and in port.
         internal double UpwindLimit(out string report)
         {
-            limits.Clear(); furledGroups.Clear(); Limit = double.NaN;
+            limits.Clear(); furledGroups.Clear(); Limit = double.NaN; KeptPerUnit = double.NaN;
             var sails = new List<KeyValuePair<double, double>>();
             var text = new System.Text.StringBuilder();
             foreach (var group in rig.Groups)
@@ -12161,11 +13633,20 @@ namespace ShipwrightAndTransport.Sailing
                 try { geometric = GeometricMinimum(group, UpwindLimits.WindShare); }
                 catch (Exception e) { Log.Info("Sailing: " + sail.name + "'s upwind limit by its geometry couldn't be read (" + e.Message + ")."); }
                 double minimum = double.IsNaN(geometric) ? analytic : geometric;
+                double draw = double.NaN;
+                if (sail.squareSail)
+                {
+                    try { draw = GeometricMinimum(group, UpwindLimits.AbackShare); }
+                    catch (Exception) { draw = double.NaN; }
+                    if (double.IsNaN(draw)) draw = UpwindLimits.SailAback(closest);
+                    draw = Math.Min(draw, minimum);
+                }
                 sails.Add(new KeyValuePair<double, double>(area, minimum));
-                limits[group] = new UpwindLimits.SailLimit(area, minimum);
+                limits[group] = new UpwindLimits.SailLimit(area, minimum, draw);
                 text.Append(text.Length > 0 ? "; " : "").Append(sail.name).Append(": efficiency ").Append(sail.upwindEfficiency.ToString("F2"))
                     .Append(", area ").Append(area.ToString("F0")).Append(", ").Append(minimum.ToString("F0"))
                     .Append(double.IsNaN(geometric) ? " by the rule (closest " + closest.ToString("F0") + ")" : " by its geometry (the rule: " + analytic.ToString("F0") + ")")
+                    .Append(double.IsNaN(draw) ? "" : ", aback inside " + draw.ToString("F0"))
                     // The angles its controls can hold it at (the user, 2026-10-11: the reading must fit what the sail can turn to): a
                     // square sail's braces from its minAngle to its maxAngle (RopeControllerSailAngleSquare), else its sheet's range.
                     .Append(", yard range ").Append(sail.minAngle.ToString("F0")).Append(" to ").Append(sail.maxAngle.ToString("F0"));
@@ -12176,12 +13657,13 @@ namespace ShipwrightAndTransport.Sailing
         }
 
         // Decision 153: each sail's least angle from her set-up scan (UpwindLimit), the limit she sails at (ChooseLimit, by her way made
-        // good), and the sails furled for it (UpdateSet: outside the limit, while the wind is inside their own close-hauled).
-        // Decision 177: at sea or in port (InPort, set by her voyage): Margin her close-hauled's beyond a sail's least angle (214: the
-        // same least angles in both).
+        // good), and the sails furled for it (UpdateSet: outside the limit, while the wind is inside their own close-hauled); each limit
+        // and each such sail judged at the speed its own sails would make (UpwindLimits.SpeedJudge).
+        // Decision 177: at sea or in port (InPort, set by the voyage, 214: the same least angles in both); Margin the close-hauled's beyond a
+        // sail's least angle, the one the voyage's steering has earned (set each navigation tick).
         private readonly Dictionary<SailGroup, UpwindLimits.SailLimit> limits = new Dictionary<SailGroup, UpwindLimits.SailLimit>();
         internal bool InPort { get; private set; }
-        internal double Margin => InPort ? TackNavigator.PortCloseMargin : TackNavigator.CloseMargin;
+        internal double Margin { get; set; } = TackNavigator.CloseMargin;
         // In port or out of it. True when it changed.
         internal bool SetInPort(bool inPort)
         {
@@ -12202,59 +13684,142 @@ namespace ShipwrightAndTransport.Sailing
         // between her jib alone and every sail every few seconds, each change a new course on the other side of the wind, and turned
         // in circles onto Dragon Cliffs' rock). `side`: her bow's side of the apparent wind (UpwindLimits.ChooseLimit).
         // `clearFar` (decision 162, in her harbour's chart): her headings judged clear further on, used when any limit has such a heading.
-        internal string ChooseLimit(double guideOff, Func<double, bool> clear = null, bool held = false, int side = 0, Func<double, bool> clearFar = null)
+        // `wind`: each heading's apparent wind, in angles off the apparent wind the ship feels now (UpwindLimits.BestVmg).
+        // `judge` known: each limit judged by the apparent wind at its own expected speed (UpwindLimits.ChooseLimit's), here too.
+        // `stretch` and `stretchLengths` (on the harbour line, UpwindLimits.LaysStretch's): in port the stretch decides when some limit lays
+        // all of it, and a held limit gives way only when it no longer does; when none does, the guide point decides as above.
+        internal string ChooseLimit(double guideOff, Func<double, bool> clear = null, bool held = false, int side = 0, Func<double, bool> clearFar = null, HeadingWind wind = default,
+            UpwindLimits.SpeedJudge judge = default, IList<double> stretch = null, IList<double> stretchLengths = null)
         {
             if (limits.Count == 0) return null;
+            var all = limits.Values.ToList();
+            var minima = all.Select(s => s.Minimum).Distinct().ToList();
+            double was = Limit;
+            string Took(double now, HeadingWind[] judgedWinds, string chosenBy)
+            {
+                if (NavigationMath.Finite(was) && Math.Abs(now - was) < 1e-6) return null;
+                Limit = now;
+                var within = limits.Where(g => g.Value.Minimum <= now + 1e-6).Select(g => g.Key.Primary ? g.Key.Primary.name : "?").ToArray();
+                string speeds = judge.Known ? "; each limit judged at the speed its sails would make: " +
+                    string.Join(", ", minima.Select((m, i) => new { m, v = judgedWinds[i].Speed }).OrderBy(x => x.m).Select(x => x.m.ToString("F0") + " at " + x.v.ToString("F1") + " m/s").ToArray()) : "";
+                return "sails at " + now.ToString("F0") + " degrees off the apparent wind with " + string.Join(", ", within) + " (" +
+                    UpwindLimits.AreaWithin(all, now).ToString("F0") + " of " + limits.Values.Sum(s => s.Area).ToString("F0") +
+                    " of its sail area; its guide point " + Math.Abs(guideOff).ToString("F0") + " degrees off the apparent wind" +
+                    (NavigationMath.Finite(was) ? "; it was " + was.ToString("F0") : "") + chosenBy + speeds + ")";
+            }
+            if (InPort && stretch != null && stretch.Count > 0 && stretchLengths != null && stretchLengths.Count == stretch.Count)
+            {
+                var stretchWinds = UpwindLimits.StretchWinds(all, minima, stretch, wind, judge);
+                double forStretch = UpwindLimits.ChooseForStretch(all, minima, stretchWinds, stretch, stretchLengths, was, Margin);
+                if (NavigationMath.Finite(forStretch))
+                {
+                    int wasAt = minima.FindIndex(x => Math.Abs(x - was) < 1e-6);
+                    if (held && wasAt >= 0 && UpwindLimits.LaysStretch(stretch, was, Margin, stretchWinds[wasAt])) return null;
+                    double nearest = double.PositiveInfinity;
+                    if (judge.Known) foreach (double h in stretch) nearest = Math.Min(nearest, Math.Abs(NavigationMath.Delta(judge.TrueFrom, h)));
+                    return Took(forStretch, stretchWinds, "; for the line ahead, " + stretchLengths.Sum().ToString("F0") + " m" +
+                        (NavigationMath.Finite(nearest) ? ", its leg nearest the wind " + nearest.ToString("F0") + " degrees off the true wind" : ""));
+                }
+            }
+            var winds = UpwindLimits.LimitWinds(all, minima, guideOff, Margin, wind, judge);
+            HeadingWind W(double m) { int i = minima.FindIndex(x => Math.Abs(x - m) < 1e-6); return i >= 0 ? winds[i] : wind; }
             if (clearFar != null)
             {
-                var all = limits.Values.ToList();
-                if (all.Select(s => s.Minimum).Distinct().Any(m => !double.IsNegativeInfinity(UpwindLimits.BestVmg(guideOff, m, UpwindLimits.AreaWithin(all, m), clearFar, 0, Margin))))
+                if (minima.Any(m => !double.IsNegativeInfinity(UpwindLimits.BestVmg(guideOff, m, UpwindLimits.AreaWithin(all, m), clearFar, 0, Margin, W(m)))))
                     clear = clearFar;
             }
-            double was = Limit;
             // Decision 190: in port a held limit gives way to one that lays her guide point when it can't itself.
-            bool laysOrNone = !InPort || UpwindLimits.Lays(guideOff, was, clear, Margin) || !limits.Values.Any(v => UpwindLimits.Lays(guideOff, v.Minimum, clear, Margin));
-            if (held && NavigationMath.Finite(was) && laysOrNone && !double.IsNegativeInfinity(UpwindLimits.BestVmg(guideOff, was, UpwindLimits.AreaWithin(limits.Values.ToList(), was), clear, 0, Margin)))
+            bool laysOrNone = !InPort || UpwindLimits.Lays(guideOff, was, clear, Margin, W(was)) || !minima.Any(m => UpwindLimits.Lays(guideOff, m, clear, Margin, W(m)));
+            if (held && NavigationMath.Finite(was) && laysOrNone && !double.IsNegativeInfinity(UpwindLimits.BestVmg(guideOff, was, UpwindLimits.AreaWithin(all, was), clear, 0, Margin, W(was))))
                 return null;
-            double now = UpwindLimits.ChooseLimit(limits.Values.ToList(), guideOff, was, clear, side, Margin, InPort);
-            if (NavigationMath.Finite(was) && Math.Abs(now - was) < 1e-6) return null;
-            Limit = now;
-            var within = limits.Where(g => g.Value.Minimum <= now + 1e-6).Select(g => g.Key.Primary ? g.Key.Primary.name : "?").ToArray();
-            return "sails at " + now.ToString("F0") + " degrees off the apparent wind with " + string.Join(", ", within) + " (" +
-                UpwindLimits.AreaWithin(limits.Values.ToList(), now).ToString("F0") + " of " + limits.Values.Sum(s => s.Area).ToString("F0") +
-                " of her sail area; her guide point " + Math.Abs(guideOff).ToString("F0") + " degrees off the apparent wind" +
-                (NavigationMath.Finite(was) ? "; it was " + was.ToString("F0") : "") + ")";
+            return Took(UpwindLimits.ChooseLimit(all, guideOff, was, clear, side, Margin, InPort, wind, judge), winds, "");
+        }
+
+        // The ship's speed ahead per unit of UpwindLimits.SetSpeed for the sails drawing now (set, the apparent wind `apparentOff` off
+        // the bow outside their least angle): the measured curve scaled to this ship, its hull and wind as they are. NaN when none draws.
+        internal double PerUnit(double forward, double apparentOff)
+        {
+            double area = 0, minimum = 0, off = Math.Abs(apparentOff);
+            foreach (var g in limits)
+                if (!furledGroups.Contains(g.Key) && g.Value.Minimum <= off) { area += Math.Max(0, g.Value.Area); minimum = Math.Max(minimum, g.Value.Minimum); }
+            double unit = area > 0 ? UpwindLimits.SetSpeed(area, off, minimum) : 0;
+            return unit > 0 && NavigationMath.Finite(forward) ? Math.Max(0, forward) / unit : double.NaN;
+        }
+
+        // The speed per unit kept from full-sail sailing (SamplePerUnit): an average with a PerUnitSeconds time constant, kept between
+        // samples for the voyage, so giving way, slowing and holds don't drag every judgement to TackNavigator.GatherSpeed. NaN before the
+        // first sample (then PerUnit as the ship sails now).
+        internal const double PerUnitSeconds = 30, PerUnitSetOut = 0.9;
+        internal double KeptPerUnit { get; private set; } = double.NaN;
+        private float perUnitAt;
+        internal double JudgePerUnit(double forward, double apparentOff) => NavigationMath.Finite(KeptPerUnit) ? KeptPerUnit : PerUnit(forward, apparentOff);
+
+        // A sample of the speed per unit, taken by the voyage only with the sails full (its cap and the heel governor's at 1); here only
+        // when PerUnitSetOut or more of the sails set (those not furled for the limit) is out.
+        internal void SamplePerUnit(double forward, double apparentOff, float now)
+        {
+            if (planSails == null) planSails = rig.Reefs.Where(b => b.Sail && b.Sail.shipRigidbody == boat.Body).Select(b => b.Sail).Distinct().ToArray();
+            double area = 0, unrolled = 0;
+            foreach (var sail in planSails)
+            {
+                if (!sail || FurledForLimit(sail)) continue;
+                area += sail.sailArea; unrolled += sail.sailArea * sail.currentUnroll;
+            }
+            if (area <= 0 || unrolled < PerUnitSetOut * area) return;
+            double sample = PerUnit(forward, apparentOff);
+            if (!NavigationMath.Finite(sample)) return;
+            KeptPerUnit = NavigationMath.Finite(KeptPerUnit) ? KeptPerUnit + (sample - KeptPerUnit) * (1 - Math.Exp(-Math.Min(1, now - perUnitAt) / PerUnitSeconds)) : sample;
+            perUnitAt = now;
         }
 
         // Each sail outside her limit set or furled for the apparent wind `apparentOff` off her bow (UpwindLimits.Draws); what
-        // changed, or null.
-        internal string UpdateSet(double apparentOff)
+        // changed, or null. With the true wind (`trueFrom` off the apparent wind, `strength` m/s) and the speed ahead (`forward`): a sail
+        // outside the limit judged by the apparent wind on this heading at the speed the set at its own least angle would make
+        // (SpeedJudge.SetOff), so that the speed it gives doesn't furl it. A square sail is set while it isn't aback (its Draw, by the
+        // apparent wind it feels), whatever the limit. `onLine` (in port on the harbour line): another sail outside the limit stays furled, the
+        // limit chosen for the line ahead deciding which sails are set.
+        internal string UpdateSet(double apparentOff, double trueFrom = double.NaN, double strength = 0, double forward = double.NaN, bool onLine = false)
         {
             if (limits.Count == 0 || !NavigationMath.Finite(Limit)) return null;
-            var changed = new List<string>();
+            bool outside = false;
+            foreach (var v in limits.Values) if (v.Minimum > Limit + 1e-6) { outside = true; break; }
+            var judge = outside && !onLine ? new UpwindLimits.SpeedJudge(trueFrom, strength, JudgePerUnit(forward, apparentOff)) : default;
+            List<string> changed = null;
             foreach (var g in limits)
             {
                 bool setNow = !furledGroups.Contains(g.Key);
-                bool draws = UpwindLimits.Draws(apparentOff, g.Value.Minimum, Limit, setNow, Margin);
+                bool drawn = NavigationMath.Finite(g.Value.Draw), beyond = g.Value.Minimum > Limit + 1e-6, judged = judge.Known && beyond && !drawn;
+                bool lineFurl = onLine && beyond && !drawn;
+                double off = judged ? judge.SetOff(apparentOff, AreaWithin(g.Value.Minimum), g.Value.Minimum) : apparentOff;
+                bool draws = !lineFurl && UpwindLimits.Draws(off, g.Value.Minimum, Limit, setNow, Margin, g.Value.Draw);
                 if (draws == setNow) continue;
                 if (draws) furledGroups.Remove(g.Key); else furledGroups.Add(g.Key);
-                changed.Add((g.Key.Primary ? g.Key.Primary.name : "?") + (draws ? " set" : " furled") + " (its close-hauled " + TackNavigator.BeatOff(g.Value.Minimum, Margin).ToString("F0") + ")");
+                (changed ?? (changed = new List<string>())).Add((g.Key.Primary ? g.Key.Primary.name : "?") + (draws ? " set" : " furled") + " (its close-hauled " +
+                    TackNavigator.BeatOff(g.Value.Minimum, Margin).ToString("F0") + (drawn ? ", aback inside " + g.Value.Draw.ToString("F0") : "") +
+                    (judged ? "; the apparent wind " + Math.Abs(off).ToString("F0") + " degrees off with it set" : "") +
+                    (lineFurl ? "; outside the limit on the harbour line" : "") + ")");
             }
-            return changed.Count > 0 ? string.Join(", ", changed.ToArray()) + ", the apparent wind " + Math.Abs(apparentOff).ToString("F0") + " degrees off her bow" : null;
+            return changed != null ? string.Join(", ", changed.ToArray()) + ", the apparent wind " + Math.Abs(apparentOff).ToString("F0") + " degrees off its bow" : null;
+        }
+
+        // The sail area within limit `minimum` (UpwindLimits.AreaWithin over the scanned sails, without a list).
+        private double AreaWithin(double minimum)
+        {
+            double area = 0;
+            foreach (var v in limits.Values) if (v.Minimum <= minimum + 1e-6) area += Math.Max(0, v.Area);
+            return area;
         }
 
         private bool FurledForLimit(Sail sail) => !Astern && furledGroups.Count > 0 && furledGroups.Any(g => g.Members.Contains(sail));
 
-        internal void Plan(float deployment, bool urgent) => PlanLimited(deployment,urgent,1);
+        internal void Plan(float deployment) => PlanLimited(deployment, 1);
 
-        internal void PlanLimited(float deployment, bool urgent, float maximumDeployment)
+        internal void PlanLimited(float deployment, float maximumDeployment)
         {
-            // No sail asked for (towed, drifting off, waiting, holding): every sail furled, no steerage sail even when her heel
-            // is urgent (the user, 2026-10-07: "Let the ship towed fully furled"; launch 5, candidates AE-AH: towed heeled over,
-            // the urgent heel response kept 15% of her sail set, which heeled her more).
+            // No sail asked for (towed, drifting off, waiting, holding): every sail furled.
             if (maximumDeployment <= 0f)
             {
-                emergencySail = null; Emergency = false; plannedDeployment = 0f; deploymentLimit = 0f;
+                plannedDeployment = 0f; deploymentLimit = 0f;
                 plannedTurnSide = TurnSide; plannedTurnOnly = TurnOnly; plannedAstern = Astern; TurnMoment = 0;
                 ResetReefPlan();
                 targets.Clear();
@@ -12267,14 +13832,11 @@ namespace ShipwrightAndTransport.Sailing
                 }
                 return;
             }
-            if (urgent && !emergencySail) SelectSteerageSail();
-            if (!urgent && deployment >= .999f) emergencySail = null;
-            Emergency = urgent;
             plannedDeployment = deployment;
-            deploymentLimit=urgent ? 1 : Mathf.Clamp01(maximumDeployment);
+            deploymentLimit = Mathf.Clamp01(maximumDeployment);
             plannedTurnSide = TurnSide; plannedTurnOnly = TurnOnly; plannedAstern = Astern; TurnMoment = 0;
             targets.Clear();
-            UpdateReefPlan(urgent);
+            UpdateReefPlan();
             foreach (var binding in rig.Reefs)
             {
                 if (!binding.Sail || !binding.Rope || binding.Rope.sail != binding.Sail ||
@@ -12284,9 +13846,6 @@ namespace ShipwrightAndTransport.Sailing
             }
             foreach (var group in rig.Groups)
             {
-                // Keep trimming the retained sail for drive; do not spend winch
-                // input moving completely furled yards during the emergency.
-                if (urgent && !group.Members.Contains(emergencySail)) continue;
                 float target = BestAngle(group);
                 group.TargetAngle = target;
                 float command = SheetCommandAngle(group, target);
@@ -12362,6 +13921,41 @@ namespace ShipwrightAndTransport.Sailing
             return report.Count > 0 ? string.Join("; ", report.ToArray()) : "no sail to set";
         }
 
+        // Each sail's hinge made again at the rest its controls measure from: the yard turned about its hinge until its controls read 0,
+        // then the hinge's object switched off and on (the game's JibAngleMaster.ResetHingeRestingRot), so the joint measures and limits
+        // the yard from that rest. A ship switched off and on (the game's horizon switch) has its hinges made again where its yards lay,
+        // and its sheets then hold each yard off its trim by that angle. A yard that doesn't read 0 once turned is turned back and left.
+        // Returns each yard's offset: its controls' angle less the hinge's own, read before (the hinge's own drifts with the hull's turns,
+        // so it is read only here, as the ship comes back).
+        internal string RezeroHinges()
+        {
+            var report = new List<string>();
+            foreach (var group in rig.Groups)
+            {
+                var sail = group.Primary;
+                if (!sail || !group.Hinge || sail.shipRigidbody != boat.Body || group.Angles.Count == 0) continue;
+                float before = CurrentAngle(group), offset = Mathf.DeltaAngle(group.Hinge.angle, before);
+                var axis = group.Hinge.transform.TransformDirection(group.Hinge.axis).normalized;
+                var pivot = group.Hinge.transform.TransformPoint(group.Hinge.anchor);
+                float turn = Mathf.DeltaAngle(before, 0);
+                group.Hinge.transform.RotateAround(pivot, axis, turn);
+                foreach (var rope in group.Angles) CallGame(rope, "Update");
+                float rest = CurrentAngle(group);
+                if (Mathf.Abs(rest) > 1f)
+                {
+                    group.Hinge.transform.RotateAround(pivot, axis, -turn);
+                    foreach (var rope in group.Angles) CallGame(rope, "Update");
+                    report.Add(sail.name + " left (it read " + rest.ToString("F0") + " once turned to its rest; " + offset.ToString("F0") + " degrees off)");
+                    continue;
+                }
+                group.Hinge.gameObject.SetActive(false);
+                group.Hinge.gameObject.SetActive(true);
+                foreach (var rope in group.Angles) rope.changed = true;
+                report.Add(sail.name + " " + offset.ToString("F0") + " degrees off");
+            }
+            return report.Count > 0 ? string.Join(", ", report.ToArray()) : "no hinge";
+        }
+
         // A game method the rope runs itself every frame (private in the game), run once more now.
         private static void CallGame(object rope, string method)
         {
@@ -12372,6 +13966,46 @@ namespace ShipwrightAndTransport.Sailing
 
         // Each sail's unrolled share as the game has it (the trace: "sails" is the planned deployment).
         internal string UnrollReport() => string.Join(", ", rig.Reefs.Where(b => b.Sail).Select(b => b.Sail).Distinct().Select(s => s.currentUnroll.ToString("F2")).ToArray());
+
+        // The unrolled share of the ship's sail area, as the game has it; NaN without sails.
+        internal double UnrolledShare()
+        {
+            if (planSails == null) planSails = rig.Reefs.Where(b => b.Sail && b.Sail.shipRigidbody == boat.Body).Select(b => b.Sail).Distinct().ToArray();
+            double area = 0, unrolled = 0;
+            foreach (var sail in planSails)
+            {
+                if (!sail) continue;
+                area += sail.sailArea; unrolled += sail.sailArea * sail.currentUnroll;
+            }
+            return area > 0 ? unrolled / area : double.NaN;
+        }
+
+        // The helm (a share of full, + turning the ship to port while it moves ahead) that holds it against its sails' turn as they stand now,
+        // shadow and unroll included, at `speed` ahead, by the game's sail forces and rudder law; NaN without its rudder or sails.
+        internal double HelmNeeded(float speed)
+        {
+            if (Rudder == null || !boat.Body) return double.NaN;
+            if (planSails == null) planSails = rig.Reefs.Where(b => b.Sail && b.Sail.shipRigidbody == boat.Body).Select(b => b.Sail).Distinct().ToArray();
+            double moment = 0;
+            int counted = 0;
+            foreach (var sail in planSails)
+            {
+                if (!sail || !sail.windcenter || sail.currentUnroll <= 0f) continue;
+                moment += SailMoment(sail, sail.currentUnroll);
+                counted++;
+            }
+            if (counted == 0) return 0;
+            return Math.Sign(moment) * Rudder.HelmFor(moment, speed);
+        }
+
+        // A sail's turn on the ship (N m, + to starboard) at `deployment`, shadow included, about the point the water holds it sideways at
+        // (its body's position), by the game's sail forces; 0 furled.
+        private double SailMoment(Sail sail, float deployment)
+        {
+            if (deployment <= 0f) return 0;
+            var force = VanillaSailForces.Predict(sail, Quaternion.identity, sail.windcenter.position, deployment);
+            return Vector3.Cross(sail.windcenter.position - boat.Body.position, boat.Body.transform.forward * force.Forward + boat.Body.transform.right * force.Sideways).y;
+        }
 
         // Every sail's sheets set to hold it on her centre line, at once (no winch, no sailor): moored alongside, a yard swung out
         // reaches over the dock (the user's pictures, 2026-10-07: the Dhow's lateen yard lay on Dragon Cliffs' boardwalk the moment
@@ -12414,13 +14048,11 @@ namespace ShipwrightAndTransport.Sailing
             }
         }
 
-        // A sail furled for her limit (decision 153) draws nothing, but the emergency's steerage sail. Decision 199: her reef plan's share
-        // for the sail where it plans (UpdateReefPlan), else every sail at the share.
-        private float DeploymentFor(Sail sail) => sail != emergencySail && FurledForLimit(sail) ? 0f
+        // A sail furled for her limit (decision 153) draws nothing. Decision 199: her reef plan's share for the sail where it plans
+        // (UpdateReefPlan), else every sail at the share.
+        private float DeploymentFor(Sail sail) => FurledForLimit(sail) || Stopping && !sail.squareSail ? 0f
             : planShare.TryGetValue(sail, out var planned) ? planned
-            : Mathf.Min(Mathf.Min(deploymentLimit, BalanceOf(sail)), emergencySail
-                ? (float)EmergencySailPolicy.Deployment(sail == emergencySail, plannedDeployment)
-                : plannedDeployment);
+            : Mathf.Min(Mathf.Min(deploymentLimit, BalanceOf(sail)), plannedDeployment);
 
         // Decision 199 (Sails\ReefPlan.cs): her sail taken in and set in whole sails, chosen by the game's own forces on her. The plan
         // stands aside (every sail at the share, as before) in the emergency and its recovery, while she backs or lies in irons (126,
@@ -12459,11 +14091,10 @@ namespace ShipwrightAndTransport.Sailing
         private double WindOnBow => windViewSet && windView.sqrMagnitude > 1e-6f ? Mathf.Atan2(windView.x, windView.y) * Mathf.Rad2Deg : double.NaN;
 
         // Decision 199 (a): her sail power in a sail (ReefPlan.SailPower) on the game's own numbers: its area (Sail.GetRealSailPower),
-        // the height of its centre of effort as the game reads it, its type.
-        private static double SailPowerOf(Sail sail) => ReefPlan.SailPower(sail.GetRealSailPower(), sail.windcenter.position.y,
-            sail.category == SailCategory.junk ? 0.75 : sail.category == SailCategory.gaff ? 0.85 : 1);
+        // the height of its centre of effort as the game reads it, its power factor as the game last pushed with it (SailPush).
+        private static double SailPowerOf(Sail sail) => ReefPlan.SailPower(sail.GetRealSailPower(), sail.windcenter.position.y, SailPush.Factor(sail));
 
-        private void UpdateReefPlan(bool urgent)
+        private void UpdateReefPlan()
         {
             if (planSails == null)
                 planSails = rig.Reefs.Where(b => b.Sail && b.Sail.shipRigidbody == boat.Body).Select(b => b.Sail).Distinct().ToArray();
@@ -12472,7 +14103,7 @@ namespace ShipwrightAndTransport.Sailing
             for (int i = 0; i < planLast.Length && i < planSails.Length; i++)
                 if (planSails[i] && Math.Abs(planSails[i].currentUnroll - planLast[i]) > ReefPlan.Settle) settled = false;
             planShare.Clear();
-            if (urgent || emergencySail || TurnOnly || Astern || Rudder == null || planSails.Length < 2 || planSails.Any(s => !s || !s.windcenter))
+            if (TurnOnly || Astern || Rudder == null || planSails.Length < 2 || planSails.Any(s => !s || !s.windcenter))
             {
                 if (planLast.Length > 0) { reefPlan.Reset(); planLast = new double[0]; planKind = new int[0]; }
                 return;
@@ -12498,11 +14129,16 @@ namespace ShipwrightAndTransport.Sailing
             }
             float speed = Vector3.Dot(boat.Body.velocity, forward);
             double demand = Mathf.Min(plannedDeployment, deploymentLimit);
-            var shares = reefPlan.Plan(input, demand, Rudder.HelmFor(1, speed), Rudder.DragFor(1, speed), WindOnBow, settled);
+            // At rest the rudder law gives almost nothing (3.1 N m a degree), and a helm worked out from it swapped sails for nothing: the
+            // plan judges the helm at PlanSpeedLeast at least.
+            double planSpeed = Math.Max(speed, PlanSpeedLeast);
+            var shares = reefPlan.Plan(input, demand, Rudder.HelmFor(1, planSpeed), Rudder.DragFor(1, planSpeed), WindOnBow, settled);
             for (int i = 0; i < planSails.Length; i++) planShare[planSails[i]] = (float)shares[i];
             NoteReefPlan(input, shares, demand, speed);
             planLast = shares;
         }
+
+        internal const float PlanSpeedLeast = 1f;
 
         // Decision 199: what her plan changed, for the log (TakeReefNote): a sail taken in (from full) or set (from furled), another mix,
         // her mix chosen anew; with her sail power carried, the helm her rudder needs to hold her against her sails' turn, and her sails'
@@ -12529,7 +14165,7 @@ namespace ShipwrightAndTransport.Sailing
             var text = new System.Text.StringBuilder();
             if (change == "fresh" || first)
             {
-                text.Append("sets her sails by decision 199: ");
+                text.Append("sets its sails by decision 199: ");
                 for (int i = 0; i < kind.Length; i++)
                     text.Append(i > 0 ? "; " : "").Append(SailLabel(planSails[i])).Append(' ')
                         .Append(input[i].Cap <= 0 ? "not drawing (decision 153)" : kind[i] == 2 ? "full" : kind[i] == 0 ? "furled" : "at " + shares[i].ToString("P0"))
@@ -12537,13 +14173,13 @@ namespace ShipwrightAndTransport.Sailing
             }
             else
             {
-                text.Append(change == "swap" ? "changes her sails over (decision 199, " + reefPlan.SwapWhy + ")" : "takes in or sets a sail (decision 199)");
+                text.Append(change == "swap" ? "changes its sails over (decision 199, " + reefPlan.SwapWhy + ")" : "takes in or sets a sail (decision 199)");
                 if (set.Count > 0) text.Append(": sets ").Append(string.Join(", ", set.ToArray()));
                 if (takenIn.Count > 0) text.Append(set.Count > 0 ? ", takes in " : ": takes in ").Append(string.Join(", ", takenIn.ToArray()));
             }
-            text.Append("; ").Append((all > 0 ? carried / all : 0).ToString("P0")).Append(" of her sail power (her share ").Append(demand.ToString("P0"))
-                .Append("), her helm to hold her against her sails' turn ").Append(Rudder.HelmFor(moment, speed).ToString("F2")).Append(" of full (")
-                .Append(ReefPlan.HelmLimit.ToString("F2")).Append(" at most), her sails' drive ").Append(drive.ToString("F0")).Append(" N less her rudder's drag ")
+            text.Append("; ").Append((all > 0 ? carried / all : 0).ToString("P0")).Append(" of its sail power (its share ").Append(demand.ToString("P0"))
+                .Append("), its helm to hold it against its sails' turn ").Append(Rudder.HelmFor(moment, speed).ToString("F2")).Append(" of full (")
+                .Append(ReefPlan.HelmLimit.ToString("F2")).Append(" at most), its sails' drive ").Append(drive.ToString("F0")).Append(" N less its rudder's drag ")
                 .Append(Rudder.DragFor(moment, speed).ToString("F0")).Append(" N at ").Append(speed.ToString("F1")).Append(" m/s");
             reefNote = text.ToString();
         }
@@ -12558,15 +14194,19 @@ namespace ShipwrightAndTransport.Sailing
             return sail.name + " (" + c.y.ToString("F0") + " m up, " + (ahead >= 0 ? ahead.ToString("F0") + " m ahead" : (-ahead).ToString("F0") + " m aft") + ")";
         }
 
-        // Decision 128 (SailBalance): each sail's balance reef caps its deployment (1: full). Balance(+1), weather helm: her aftmost
-        // sail still above BalanceFloor is reefed a step (a mizzen first); Balance(-1), lee helm: her foremost (a jib first); a
-        // single sail is the one; Balance(0): her most reefed sail is let out a step. What changed, or null.
+        // Decision 128 (SailBalance): each sail's balance reef caps its deployment (1: full). Balance(+1), weather helm: the aftmost
+        // sail above BalanceFloor whose step of reef takes StepHelmLeast or more off the helm held is reefed a step (ReefChoice);
+        // Balance(-1), lee helm: the foremost such sail; Balance(0): the most reefed sail is let out a step. `heldHelm`: the helm held
+        // (+ to port, as ahead); `speed`: the speed the rudder law reads it at. What changed, or null; `none`: why nothing was reefed.
         internal const float BalanceStep = 0.1f, BalanceFloor = 0.3f;
+        internal const double StepHelmLeast = 0.02;
+        internal const string HelmNotSails = "the helm isn't the sails': no sail reefed";
         private readonly Dictionary<Sail, float> balanceReef = new Dictionary<Sail, float>();
         internal float BalanceOf(Sail sail) => sail && balanceReef.TryGetValue(sail, out var cap) ? cap : 1f;
 
-        internal string Balance(int helm)
+        internal string Balance(int helm, double heldHelm, double speed, out string none)
         {
+            none = null;
             var own = rig.Reefs.Where(b => b.Sail && b.Sail.shipRigidbody == boat.Body).Select(b => b.Sail).Distinct().ToList();
             if (own.Count == 0) return null;
             if (helm == 0)
@@ -12581,14 +14221,48 @@ namespace ShipwrightAndTransport.Sailing
             }
             var mass = boat.Body.worldCenterOfMass;
             var forward = boat.Body.transform.forward;
-            // A sail furled for her limit (decisions 153, 190) draws nothing: reefing it would change nothing (the Cog on her jib alone,
-            // her square furled aft of it, would have spent seven steps of a weather helm's reef on the square). Nor one her reef plan has
-            // taken in (decision 199).
-            var sail = own.Where(Drawing)
-                .OrderBy(s => helm * Vector3.Dot(s.windcenter.position - mass, forward)).FirstOrDefault(s => BalanceOf(s) > BalanceFloor + 0.001f);
-            if (!sail) return null;
+            int n = own.Count;
+            var along = new double[n];
+            var stepHelm = new double[n];
+            var caps = new float[n];
+            var drawing = new bool[n];
+            for (int i = 0; i < n; i++)
+            {
+                var s = own[i];
+                caps[i] = BalanceOf(s);
+                // A sail furled for its limit (decisions 153, 190) or taken in by the reef plan (decision 199) draws nothing.
+                drawing[i] = s.windcenter && Drawing(s);
+                if (!drawing[i]) continue;
+                along[i] = Vector3.Dot(s.windcenter.position - mass, forward);
+                // Its turn on the ship at the unroll it has (under its cap) and a step under its cap, as HelmNeeded reckons it; the helm that
+                // step takes off, + where its turn is the one the helm holds against.
+                float now = Mathf.Min(s.currentUnroll, caps[i]), after = Mathf.Max(0f, Mathf.Min(s.currentUnroll, caps[i] - BalanceStep));
+                double moment = SailMoment(s, now) - SailMoment(s, after);
+                stepHelm[i] = Rudder != null ? Math.Sign(heldHelm) * Math.Sign(moment) * Rudder.HelmFor(moment, speed) : 0;
+            }
+            int choice = ReefChoice(helm, along, stepHelm, caps, drawing);
+            if (choice < 0)
+            {
+                bool room = false;
+                for (int i = 0; i < n; i++) room |= drawing[i] && caps[i] > BalanceFloor + 0.001f;
+                none = room ? HelmNotSails : "its sail already at its least";
+                return null;
+            }
+            var sail = own[choice];
             balanceReef[sail] = Mathf.Max(BalanceFloor, BalanceOf(sail) - BalanceStep);
-            return sail.name + " reefed to " + BalanceOf(sail).ToString("P0") + (own.Count > 1 ? " (her " + (helm > 0 ? "aftmost" : "foremost") + " sail not yet at " + BalanceFloor.ToString("P0") + ")" : "");
+            return sail.name + " reefed to " + BalanceOf(sail).ToString("P0") + " (its step " + stepHelm[choice].ToString("F2") + " of the helm" +
+                (n > 1 ? ", the " + (helm > 0 ? "aftmost" : "foremost") + " sail that makes it" : "") + ")";
+        }
+
+        // The sail a balance reef goes to: of those drawing above BalanceFloor whose step of reef takes StepHelmLeast or more off the
+        // helm held (`stepHelm`, + where the sail's turn is the one the helm holds against), the aftmost (`order` +1) or the foremost (-1)
+        // by `along` (metres ahead of the centre of mass); -1 for none.
+        internal static int ReefChoice(int order, IList<double> along, IList<double> stepHelm, IList<float> caps, IList<bool> drawing)
+        {
+            int best = -1;
+            for (int i = 0; i < caps.Count; i++)
+                if (drawing[i] && caps[i] > BalanceFloor + 0.001f && stepHelm[i] >= StepHelmLeast && (best < 0 || order * along[i] < order * along[best])) best = i;
+            return best;
         }
 
         // A sail drawing: not furled for her limit (153, 190), not taken in by her reef plan (199).
@@ -12602,28 +14276,6 @@ namespace ShipwrightAndTransport.Sailing
             for (int i = 0; i < caps.Count; i++)
                 if (drawing[i] && caps[i] < 1f && (best < 0 || caps[i] < caps[best])) best = i;
             return best;
-        }
-
-        private void SelectSteerageSail()
-        {
-            Sail fallback = null;
-            float bestScore = float.NegativeInfinity, fallbackPower = float.NegativeInfinity;
-            foreach (var binding in rig.Reefs)
-            {
-                var sail = binding.Sail;
-                if (!sail || sail.shipRigidbody != boat.Body || !sail.IsInstalled()) continue;
-                float height = Mathf.Max(1, sail.windcenter.position.y - boat.Body.worldCenterOfMass.y);
-                float power = sail.GetRealSailPower() / height;
-                if (power > fallbackPower) { fallbackPower = power; fallback = sail; }
-                var force = VanillaSailForces.Predict(sail, Quaternion.identity, sail.windcenter.position,
-                    (float)EmergencySailPolicy.SteerageDeployment);
-                if (force.Forward <= .01f) continue;
-                float score = force.Forward / (1 + Mathf.Abs(force.Sideways) * height);
-                if (score > bestScore) { bestScore = score; emergencySail = sail; }
-            }
-            if (!emergencySail) emergencySail = fallback;
-            if (!emergencySail) throw new InvalidOperationException("No usable sail remains for emergency steerage.");
-            Log.Info("Emergency steerage sail: " + emergencySail.name + "; retained at15%; other sails reef through maximum-input winches. Selection held through recovery.");
         }
 
         private float SheetCommandAngle(SailGroup group, float desired)
@@ -12933,7 +14585,7 @@ namespace ShipwrightAndTransport.Sailing
         // No sheet movement or direct sail deployment writes are needed to furl.
         internal bool FurlAtNativeRate(float dt)
         {
-            StopInputs(); Emergency = false;
+            StopInputs();
             bool furled = true;
             foreach (var binding in rig.Reefs)
             {
@@ -12953,7 +14605,6 @@ namespace ShipwrightAndTransport.Sailing
         internal void EmergencyFurlImmediate()
         {
             targets.Clear();
-            Emergency = true;
             // Use the acquisition snapshot. A changed rig must not redirect cleanup to another vessel's line.
             foreach (var binding in rig.Reefs)
             {
@@ -12983,6 +14634,9 @@ namespace ShipwrightAndTransport.Sailing
         private readonly GPButtonSteeringWheel[] wheels;
         private readonly bool[] wasLocked;
         private readonly float[] limits;
+        private readonly HingeJoint hinge;
+        private readonly Rudder rudder;
+        private static readonly AccessTools.FieldRef<Rudder, float> AngleOffset = AccessTools.FieldRefAccess<Rudder, float>("angleOffset");
         internal float Demand;
         internal HelmAdapter(GPButtonSteeringWheel wheel) : this(new[] { wheel }) { }
         internal HelmAdapter(IEnumerable<GPButtonSteeringWheel> controls)
@@ -12992,33 +14646,45 @@ namespace ShipwrightAndTransport.Sailing
                 throw new InvalidOperationException("Helm controls must share one rudder.");
             wasLocked = wheels.Select(w => (bool)GameBindings.WheelLocked.GetValue(w)).ToArray();
             limits = new float[wheels.Length];
-        }
-        // Decision 132 (the user: "once the direction is right, let go of helm, vanilla's rudder push back will automatically make
-        // ship stay in course"): the wheels unlocked and left alone. Unheld and unlocked, the game's wheel follows its rudder
-        // (GPButtonSteeringWheel.ExtraLateUpdate), and the rudder's own push back turns it against any turn of the ship, the more
-        // the faster she goes (Rudder.ApplyCenteringForce). Apply takes the helm again.
-        internal bool Released { get; private set; }
-
-        internal void Release()
-        {
-            if (Released) return;
-            Released = true;
-            for (int i = 0; i < wheels.Length; i++)
-                if (wheels[i]) GameBindings.WheelLocked.SetValue(wheels[i], false);
+            hinge = wheels[0].attachedRudder;
+            rudder = hinge.GetComponent<Rudder>();
         }
 
-        // Where her rudder stands, as a share of full helm in Demand's sense: the first wheel's input over its limit (a free wheel
-        // follows the rudder).
-        internal float Current
+        // The blade's angle as the game reads it in Rudder.FixedUpdate: its local turn about its up axis (`localY`, 0-360, past 180 counted
+        // back) plus the rudder's angleOffset.
+        internal static float BladeRead(float localY, float offset) => (localY > 180f ? localY - 360f : localY) + offset;
+        private float Blade() => BladeRead(rudder.transform.localRotation.eulerAngles.y, AngleOffset(rudder));
+        // The blade's angle as the game reads it, and the angle the wheels ask of its hinge (its spring's target); NaN without a rudder.
+        internal float BladeNow => rudder ? Blade() : float.NaN;
+        internal float AskedAngle => hinge ? hinge.spring.targetPosition : float.NaN;
+
+        // The rudder's hinge made again at the rest its blade is read from: the blade turned about the hinge until the game reads it at 0
+        // (the other way round if the hinge's axis is the blade's down), then the hinge's object switched off and on (the game's
+        // JibAngleMaster.ResetHingeRestingRot), so the joint measures and limits the blade from there; its body given the hull's motion. A
+        // blade that doesn't read 0 once turned is turned back and left. Returns the blade's offset: its angle as read less the joint's own,
+        // read before.
+        internal string RezeroRudder(Rigidbody ship)
         {
-            get
+            if (!hinge || !rudder) return "no rudder";
+            float before = Blade(), offset = Mathf.DeltaAngle(hinge.angle, before);
+            var axis = hinge.transform.TransformDirection(hinge.axis).normalized;
+            var pivot = hinge.transform.TransformPoint(hinge.anchor);
+            float turn = Mathf.DeltaAngle(before, 0);
+            hinge.transform.RotateAround(pivot, axis, turn);
+            if (Mathf.Abs(Blade()) > 1f) hinge.transform.RotateAround(pivot, axis, -2f * turn);
+            float rest = Blade();
+            if (Mathf.Abs(rest) > 1f)
             {
-                var wheel = wheels[0];
-                float limit = wheel ? (float)GameBindings.WheelLimit.GetValue(wheel) : 0f;
-                return wheel && limit > 0 ? Mathf.Clamp(wheel.currentInput / limit, -1f, 1f) : 0f;
+                hinge.transform.RotateAround(pivot, axis, turn);
+                return "the rudder left (it read " + rest.ToString("F0") + " once turned to its rest; " + offset.ToString("F0") + " degrees off)";
             }
+            hinge.gameObject.SetActive(false);
+            hinge.gameObject.SetActive(true);
+            rudder.currentAngle = Blade();
+            var body = hinge.GetComponent<Rigidbody>();
+            if (body && !body.isKinematic && ship) { body.angularVelocity = ship.angularVelocity; body.velocity = ship.GetPointVelocity(body.worldCenterOfMass); }
+            return "the rudder " + offset.ToString("F0") + " degrees off";
         }
-
         // Decision 199 (c): her rudder by the game's law for her reef plan (Rudder: rudderPower, dragPower; full helm at its hinge's
         // limit, as the wheel sets it), or null where it can't be read.
         internal RudderModel Model()
@@ -13032,7 +14698,6 @@ namespace ShipwrightAndTransport.Sailing
 
         internal void Apply()
         {
-            Released = false;
             for (int i = 0; i < wheels.Length; i++)
             {
                 limits[i] = wheels[i] ? (float)GameBindings.WheelLimit.GetValue(wheels[i]) : float.NaN;
@@ -13092,14 +14757,51 @@ namespace ShipwrightAndTransport.Sailing
             float y = (pivot + rotation * (sail.windcenter.position - pivot)).y;
             float height = Mathf.Lerp(0.8f, 1.4f, Mathf.InverseLerp(0, 22, y));
             double captured = SailForceMath.Captured(wind.magnitude, incidence, sail.upwindEfficiency, height, shadow ? sail.GetCurrentShadowMult() : 1f, Mathf.Max(Debugger.instance.debugYardMult, deployment));
-            float power = sail.GetRealSailPower() * 50;
-            if (sail.category == SailCategory.junk) power *= 0.75f;
-            if (sail.category == SailCategory.gaff) power *= 0.85f;
+            float power = sail.GetRealSailPower() * 50 * SailPush.Factor(sail);
             return new SailForceSample {
                 Incidence = incidence,
                 Forward = (float)SailForceMath.Forward(captured, angle, sail.upwindEfficiency) * power,
                 Sideways = (float)SailForceMath.Sideways(captured, angle, Vector3.Dot(normal, sail.shipRigidbody.transform.right) >= 0) * power
             };
+        }
+    }
+
+    // Each sail's power factor as the game last pushed with it: Sail.ApplyForce pushes with unamplifiedForwardForce x 50 x GetRealSailPower()
+    // x a factor (a junk sail 0.75, a gaff 0.85, or what another mod sets in that method) and keeps the push in outFinalForwardForce. The last
+    // factor read is kept while the sail draws nothing; its kind's until the first reading.
+    internal static class SailPush
+    {
+        private static readonly AccessTools.FieldRef<Sail, float> FinalForward = AccessTools.FieldRefAccess<Sail, float>("outFinalForwardForce");
+        private static readonly AccessTools.FieldRef<Sail, float> Unamplified = AccessTools.FieldRefAccess<Sail, float>("unamplifiedForwardForce");
+        private static readonly Dictionary<Sail, float> last = new Dictionary<Sail, float>();
+        private const int PruneAbove = 256;
+
+        internal static float Factor(Sail sail)
+        {
+            last.TryGetValue(sail, out float known);
+            float f = SailFactor.From(FinalForward(sail), Unamplified(sail), sail.GetRealSailPower(), known > 0 ? known : SailFactor.OfKind(sail.category));
+            if (f != known)
+            {
+                if (last.Count >= PruneAbove) foreach (var gone in last.Keys.Where(s => !s).ToList()) last.Remove(gone);
+                last[sail] = f;
+            }
+            return f;
+        }
+    }
+
+    internal static class SailFactor
+    {
+        // The game's own factor for a sail's kind (Sail.ApplyForce).
+        internal static float OfKind(SailCategory category) => category == SailCategory.junk ? 0.75f : category == SailCategory.gaff ? 0.85f : 1f;
+
+        // The factor a push shows (`finalForward` over `unamplified` x 50 x `realPower`), or `known` where the sail draws next to nothing or
+        // the reading is out of reason.
+        internal static float From(float finalForward, float unamplified, float realPower, float known)
+        {
+            float push = unamplified * 50f * realPower;
+            if (!(Math.Abs(push) > 1e-3f)) return known;
+            float f = finalForward / push;
+            return f > 0.01f && f < 10f ? f : known;
         }
     }
 
@@ -13124,38 +14826,32 @@ namespace ShipwrightAndTransport.Sailing
         }
     }
 
-    // ==== EmergencySailPolicy ====
-
-    // Adapted from the Ship Transport Prototype (ChatGPT "Astra"'s work for the user, handed over 2026-10-06; decisions 92-93).
-
-    public static class EmergencySailPolicy
-    {
-        public const double SteerageDeployment = 0.15;
-
-        // One retained sail keeps steerage. Other independently reefed sails
-        // reopen progressively after the low-heel recovery dwell.
-        public static double Deployment(bool retained, double demand)
-        {
-            if (!NavigationMath.Finite(demand)) throw new ArgumentException("Invalid emergency deployment.");
-            demand = NavigationMath.Clamp(demand, SteerageDeployment, 1);
-            return retained ? demand : (demand - SteerageDeployment) / (1 - SteerageDeployment);
-        }
-    }
-
     // ==== HeelGovernor ====
 
     // Adapted from the Ship Transport Prototype (ChatGPT "Astra"'s work for the user, handed over 2026-10-06; decisions 92-93).
 
-    public enum HeelState { Normal, Caution, Urgent }
+    public enum HeelState { Normal, Caution }
 
+    // The share of its sail the ship carries for the sea coming over its deck: its own deck-overflow points (WaterIngressSensor) going
+    // under the sea, each time counted as a dip. SpillDips dips within SpillWindow, or SpillUnder seconds under in all within
+    // UnderWindow, take ReefStep in (Caution), and the count starts again; ReefEvery at the soonest, never under LeastShare. With no dip
+    // for ClearFor, ReefStep back every LetOutEvery. A share below full not taken in for the sea (a start, a hold's retry) comes back
+    // ReefStep every StartEvery while no dip. Heel itself takes nothing in.
     public sealed class HeelGovernor
     {
-        private double filtered, cautionTime, urgentRecovery, calmTime, reefTime;
-        private double previous;
-        private bool initialized;
-        private bool recoveringFromHeel;
+        internal const double SpillWindow = 30, UnderWindow = 10, SpillUnder = 2, ReefStep = 0.1, ReefEvery = 5, LeastShare = 0.3,
+            ClearFor = 30, LetOutEvery = 10, StartEvery = 5;
+        internal const int SpillDips = 3;
+        private readonly Queue<double> dips = new Queue<double>();
+        private readonly Queue<KeyValuePair<double, double>> under = new Queue<KeyValuePair<double, double>>();
+        private double now, underSum, underRun, minuteLongest, lastReef = double.NegativeInfinity, lastDip = double.NegativeInfinity, lastLetOut;
+        private bool wasUnder, forSea;
+        private int minuteDips;
         public HeelState State { get; private set; }
         public double Deployment { get; private set; }
+        // Why the last reef was taken, and how many so far (for the log).
+        internal string ReefWhy { get; private set; }
+        internal int Reefs { get; private set; }
 
         public HeelGovernor(double initialDeployment = 1)
         {
@@ -13163,63 +14859,45 @@ namespace ShipwrightAndTransport.Sailing
             Deployment = NavigationMath.Clamp(initialDeployment, 0, 1);
         }
 
-        public void Tick(double rawHeel, double dt, bool takingWater = false)
+        // `spilling`: a deck-overflow point under the sea now.
+        public void Tick(double dt, bool spilling)
         {
-            if (!NavigationMath.Finite(rawHeel) || !NavigationMath.Finite(dt) || dt <= 0)
-                throw new ArgumentException("Invalid heel sample.");
-            double heel = Math.Abs(rawHeel);
-            if (!initialized) { filtered = heel; previous = heel; initialized = true; }
-            filtered += (heel - filtered) * (1 - Math.Exp(-dt / 0.5));
-            var riseRate = Math.Max(0, (heel - previous) / dt);
-            previous = heel;
-
-            // Emergency reefing follows this hull's actual deck overflow, not
-            // a universal heel angle. Different hulls immerse their deck at
-            // different angles and wave heights.
-            if (takingWater)
+            if (!NavigationMath.Finite(dt) || dt <= 0) throw new ArgumentException("Invalid heel sample.");
+            now += dt;
+            if (spilling)
             {
-                State = HeelState.Urgent;
-                recoveringFromHeel = true;
-                Deployment = EmergencySailPolicy.SteerageDeployment;
-                urgentRecovery = calmTime = cautionTime = reefTime = 0;
+                if (!wasUnder) { dips.Enqueue(now); minuteDips++; underRun = 0; }
+                underRun += dt; minuteLongest = Math.Max(minuteLongest, underRun);
+                under.Enqueue(new KeyValuePair<double, double>(now, dt)); underSum += dt;
+                lastDip = now;
+            }
+            wasUnder = spilling;
+            while (dips.Count > 0 && now - dips.Peek() > SpillWindow) dips.Dequeue();
+            while (under.Count > 0 && now - under.Peek().Key > UnderWindow) underSum -= under.Dequeue().Value;
+            if ((dips.Count >= SpillDips || underSum >= SpillUnder) && now - lastReef >= ReefEvery)
+            {
+                if (Deployment > LeastShare + 1e-9)
+                {
+                    ReefWhy = dips.Count + " dips of its deck under the sea within " + SpillWindow.ToString("F0") + " s, " + underSum.ToString("F1") +
+                        " s under within " + UnderWindow.ToString("F0") + " s";
+                    Deployment = Math.Max(LeastShare, Deployment - ReefStep); Reefs++;
+                }
+                State = HeelState.Caution; forSea = true; lastReef = now;
+                dips.Clear(); under.Clear(); underSum = 0;
                 return;
             }
-            if (State == HeelState.Urgent)
+            double clear = forSea ? ClearFor : StartEvery, every = forSea ? LetOutEvery : StartEvery;
+            if (Deployment < 1 && now - lastDip >= clear && now - lastReef >= clear && now - lastLetOut >= every)
             {
-                urgentRecovery += dt;
-                if (urgentRecovery < 5) return;
-                State = HeelState.Caution;
-                urgentRecovery = 0;
+                Deployment = Math.Min(1, Deployment + ReefStep); lastLetOut = now;
             }
-            cautionTime = filtered >= 20 ? cautionTime + dt : 0;
-            if (cautionTime >= 2)
-            {
-                State = HeelState.Caution;
-                recoveringFromHeel = true;
-                reefTime += dt;
-                if (reefTime >= 2) { Deployment = Math.Max(EmergencySailPolicy.SteerageDeployment, Deployment - 0.1); reefTime = 0; }
-            }
-            else reefTime = 0;
+            if (Deployment >= 1 && now - lastDip >= clear) { State = HeelState.Normal; forSea = false; }
+        }
 
-            // After depowering, restore enough sail for steerage in bounded
-            // steps. Five percent per fifteen seconds left a recovered upright
-            // hull almost powerless for minutes, especially while it was turning.
-            // Decision 225 (18): 15 degrees whenever she is under full sail (a governor made new after a hold or back from the clock
-            // starts reefed without the recovery flag: at a steady 12 degrees she stayed at about half sail for good).
-            double lowHeel = recoveringFromHeel || Deployment < 1 ? 15 : 10;
-            // Small wave rolls can rise faster than three degrees/second while
-            // staying safely upright. Only veto recovery when that rise could
-            // reach the recovery boundary within the next half second.
-            double projectedHeel = heel + riseRate * 0.5;
-            calmTime = heel < lowHeel && filtered < lowHeel && projectedHeel < lowHeel ? calmTime + dt : 0;
-            double recoveryInterval = recoveringFromHeel && Deployment >= 0.3 ? 10 : 5;
-            if (calmTime >= recoveryInterval)
-            {
-                Deployment = Math.Min(1, Deployment + 0.1);
-                State = HeelState.Normal;
-                calmTime = 0;
-                if (Deployment >= 1) recoveringFromHeel = false;
-            }
+        // The dips since the last call and the longest time one lasted (s), for the minute line.
+        internal void TakeMinute(out int dipsThisMinute, out double longestUnder)
+        {
+            dipsThisMinute = minuteDips; longestUnder = minuteLongest; minuteDips = 0; minuteLongest = 0;
         }
     }
 
@@ -13256,8 +14934,11 @@ namespace ShipwrightAndTransport.Sailing
             Power = power; Drag = drag; FullAngle = fullAngle;
         }
 
+        // Its turn on her for each degree of it at `speed` (m/s ahead), N·m.
+        internal double Strength(double speed) => Power * Math.Abs(speed) + 3.1;
+
         // The share of full helm that holds her against a turn of `moment` (N·m) at `speed` (m/s ahead).
-        internal double HelmFor(double moment, double speed) => Math.Abs(moment) / ((Power * Math.Abs(speed) + 3.1) * FullAngle);
+        internal double HelmFor(double moment, double speed) => Math.Abs(moment) / (Strength(speed) * FullAngle);
 
         // Its drag (N) holding her against that turn.
         internal double DragFor(double moment, double speed)
@@ -13279,9 +14960,9 @@ namespace ShipwrightAndTransport.Sailing
         private const double Tiny = 1e-9;
 
         // Decision 199 (a): her sail power in a sail, its area times the game's height multiplier at its centre of effort
-        // (Sail.GetWindHeightMult: 0.8 at y 0 to 1.4 from y 22) and its type's factor (Sail.ApplyForce: a junk sail 0.75, a gaff 0.85).
-        internal static double SailPower(double area, double centreY, double typeFactor) =>
-            area * (0.8 + 0.6 * NavigationMath.Clamp(centreY / 22, 0, 1)) * typeFactor;
+        // (Sail.GetWindHeightMult: 0.8 at y 0 to 1.4 from y 22) and its power factor (Sail.ApplyForce's, SailPush).
+        internal static double SailPower(double area, double centreY, double powerFactor) =>
+            area * (0.8 + 0.6 * NavigationMath.Clamp(centreY / 22, 0, 1)) * powerFactor;
 
         // Her sails' push ahead and turn on her with these shares.
         internal static void Totals(ReefSail[] sails, double[] shares, out double drive, out double moment)
@@ -13363,8 +15044,8 @@ namespace ShipwrightAndTransport.Sailing
                     if (gain && Differs(best, next, cap))
                     {
                         next = best; Change = "swap";
-                        SwapWhy = heavy ? "her helm would be " + now.Helm.ToString("F2") + " of full, over " + HelmLimit.ToString("F2")
-                            : "the apparent wind on her bow moved " + shift.ToString("F0") + " degrees since her sails were chosen";
+                        SwapWhy = heavy ? "its helm would be " + now.Helm.ToString("F2") + " of full, over " + HelmLimit.ToString("F2")
+                            : "the apparent wind on its bow moved " + shift.ToString("F0") + " degrees since its sails were chosen";
                     }
                     chosenWind = windOnBow;
                 }
@@ -13584,10 +15265,10 @@ namespace ShipwrightAndTransport.Sailing
         // Decision 183 (c) (the user: "add reef fix"), with 186 (the user, 2026-10-11 night, asked whether a reef let out while slow and
         // a weather helm's reef could take turns every few seconds: "sure", to let it out only while her helm is light): under SlowSpeed,
         // with nothing overpowering her helm (`overpowered`: reefing against a weather helm or one building, spinning, backing) and her
-        // helm under HelmHold.LightHelm of full, a reef is let out (Voyage.Steer, a step every 2 s).
-        public const double SlowSpeed = 1;
+        // helm under SlowLightHelm of full, a reef is let out (Voyage.Steer, a step every 2 s).
+        public const double SlowSpeed = 1, SlowLightHelm = 0.5;
         internal static bool SlowLetOut(double forward, bool overpowered, double helm) =>
-            forward < SlowSpeed && !overpowered && Math.Abs(helm) < HelmHold.LightHelm;
+            forward < SlowSpeed && !overpowered && Math.Abs(helm) < SlowLightHelm;
 
         // The averaged helm: + weather helm, - lee helm.
         public double WeatherHelm => average;
@@ -13660,11 +15341,25 @@ namespace ShipwrightAndTransport.Sailing
         private bool pendingRetrim;
         private double pendingAngle, pendingSince;
 
+        // No angle drives: `keep` (the held target, or where the sail is) unless the sample there pushes the ship backwards, else the
+        // nearest angle that doesn't; `keep` when every angle does.
+        internal static double NoDrive(IReadOnlyList<TrimSample> samples, double keep)
+        {
+            double nearest = double.NaN;
+            foreach (var sample in samples)
+            {
+                if (sample.Forward < -0.001) continue;
+                if (Math.Abs(sample.Angle - keep) <= 0.5) return keep;
+                if (double.IsNaN(nearest) || Math.Abs(sample.Angle - keep) < Math.Abs(nearest - keep)) nearest = sample.Angle;
+            }
+            return double.IsNaN(nearest) ? keep : nearest;
+        }
+
         internal double Choose(IReadOnlyList<TrimSample> samples, double current, double closedAngle, double now)
         {
             double peak = 0;
             foreach (var sample in samples) peak = Math.Max(peak, sample.Forward);
-            if (peak <= 0.001) { pendingRetrim = false; return hasTarget ? target : current; }
+            if (peak <= 0.001) { pendingRetrim = false; return NoDrive(samples, hasTarget ? target : current); }
 
             // Never eased past full draw (decision 134): where any angle in the band draws fully, only those count, so a small shift
             // can't tip the sail into luffing.
@@ -13831,7 +15526,7 @@ namespace ShipwrightAndTransport.Sailing
                 while (true)
                 {
                     string at = current == id ? id.ToString() : id + " (in crate " + current + ")";
-                    if (!expected.Contains(current)) { reasons.Add(at + ": its crate is not her cargo"); break; }
+                    if (!expected.Contains(current)) { reasons.Add(at + ": its crate is not its cargo"); break; }
                     if (duplicates.Contains(current)) { reasons.Add(at + ": in the world twice"); break; }
                     if (!visited.Add(current)) { reasons.Add(at + ": crates inside each other in a loop"); break; }
                     if (!byId.TryGetValue(current, out var item)) { reasons.Add(at + ": not in the world"); break; }
@@ -13844,7 +15539,7 @@ namespace ShipwrightAndTransport.Sailing
                         }
                         current = item.ContainerId;
                     }
-                    else { if (!item.AttachedToBoat) reasons.Add(at + ": not aboard her"); break; }
+                    else { if (!item.AttachedToBoat) reasons.Add(at + ": not aboard it"); break; }
                 }
             }
             return reasons.Count == 0 ? "every expected item ready (" + expected.Count + ")" : reasons.Count + " of " + expected.Count + " not ready: " + string.Join("; ", reasons);
@@ -13933,6 +15628,319 @@ namespace ShipwrightAndTransport.Sailing
                 bestDistance = distance;
                 StalledSeconds = 0;
             }
+        }
+    }
+
+    // ==== Scorecard ====
+
+    // One minute's or one voyage's sums of a voyage's scorecard (Scorecard).
+    internal sealed class ScoreTotals
+    {
+        // Seconds sailing in physics, and of them on a steady course.
+        internal double Seconds, SteadySeconds;
+        // The bow's error off a steady course: degree-seconds, and the worst (degrees).
+        internal double ErrorSum, ErrorWorst;
+        // The helm (a share of full): its size over time and its reversals.
+        internal double HelmSum;
+        internal int Reversals;
+        // At sail plans on a steady course: the helm the sails' forces call for and the helm on (signed alike), and the gap between them.
+        internal int NeedCount;
+        internal double NeedSum, UsedSum, GapSum;
+        // The turn rate for full helm (degrees a second, + the way the helm turns the ship) in each speed band (Scorecard.BandTop).
+        internal readonly double[] RateSum = new double[Scorecard.Bands];
+        internal readonly int[] RateCount = new int[Scorecard.Bands];
+        // Tacks and wears begun, ended and done; over those ended, their seconds and the speed lost (at the start less the least in it).
+        internal int Turns, TurnsEnded, TurnsDone;
+        internal double TurnSeconds, TurnSpeedLost;
+        // The sail out (the unrolled share of the sail area) at sail plans, and its changes.
+        internal int ShareCount, ShareChanges;
+        internal double ShareSum;
+        internal int Holds;
+        internal double HoldSeconds;
+        // At sail plans under way: the speed ahead, the speed curve's share for the apparent wind, the speed for the curve's full share
+        // (where its share is Scorecard.PerShareLeast or more), and the true wind's speed.
+        internal int SpeedCount, PerShareCount;
+        internal double SpeedSum, CurveSum, PerShareSum, WindSum;
+        // Game saves while the ship was under way in physics: the seconds it was unsteered after them and the worst; the longest frame within
+        // Scorecard.AfterSave of a save (ms).
+        internal int Saves;
+        internal double UnsteeredSum, UnsteeredWorst, FrameAfterSave;
+        // The sailor's starts and their time (ms).
+        internal int Starts;
+        internal double StartMs, StartWorst;
+        // The cost (ms): the steering and the navigation step (each physics step), the sails' plans, the clearance checks.
+        internal double SteerMs, SteerWorst, NavMs, NavWorst, PlanMs, PlanWorst, CheckMs;
+        internal int Plans, Checks;
+        // The managed heap's growth across the voyage's ticks (bytes; the heap grows by blocks, so it is an estimate).
+        internal long Made;
+
+        private static double Mean(double sum, double count) => count > 0 ? sum / count : double.NaN;
+        private static string N(double value, string format) => NavigationMath.Finite(value) ? value.ToString(format, CultureInfo.InvariantCulture) : "-";
+
+        internal double ErrorMean => Mean(ErrorSum, SteadySeconds);
+        internal double HelmMean => Mean(HelmSum, Seconds);
+        internal double NeedMean => Mean(NeedSum, NeedCount);
+        internal double UsedMean => Mean(UsedSum, NeedCount);
+        internal double GapMean => Mean(GapSum, NeedCount);
+        internal double RateMean(int band) => Mean(RateSum[band], RateCount[band]);
+        internal double TurnSecondsMean => Mean(TurnSeconds, TurnsEnded);
+        internal double TurnSpeedLostMean => Mean(TurnSpeedLost, TurnsEnded);
+        internal double ShareMean => Mean(ShareSum, ShareCount);
+        internal double SpeedMean => Mean(SpeedSum, SpeedCount);
+        internal double CurveMean => Mean(CurveSum, SpeedCount);
+        internal double PerShareMean => Mean(PerShareSum, PerShareCount);
+        internal double WindMean => Mean(WindSum, SpeedCount);
+        internal double StartMean => Mean(StartMs, Starts);
+
+        internal const string Header = "seconds\tsteady_s\tbow_error_mean\tbow_error_worst\thelm_mean\thelm_reversals\thelm_need_samples\thelm_need_mean\thelm_used_mean\thelm_gap_mean\t" +
+            "rate_under_1.5\trate_n_under_1.5\trate_1.5_2.5\trate_n_1.5_2.5\trate_2.5_3.5\trate_n_2.5_3.5\trate_over_3.5\trate_n_over_3.5\t" +
+            "turns\tturns_ended\tturns_done\tturn_s_mean\tturn_speed_lost_mean\tsail_out_mean\tsail_changes\tholds\thold_s\t" +
+            "speed_mean\tcurve_share_mean\tspeed_full_share\twind_mean\tsaves\tunsteered_s\tunsteered_worst_s\tframe_after_save_ms\t" +
+            "starts\tstart_ms_mean\tstart_ms_worst\tsteer_ms\tsteer_worst_ms\tnav_ms\tnav_worst_ms\tplans\tplan_ms\tplan_worst_ms\tchecks\tcheck_ms\tmade_kb";
+
+        // One tab-separated row, in Header's order.
+        internal string Row()
+        {
+            var cells = new List<string>
+            {
+                N(Seconds, "F1"), N(SteadySeconds, "F1"), N(ErrorMean, "F2"), N(ErrorWorst, "F1"), N(HelmMean, "F3"), Reversals.ToString(CultureInfo.InvariantCulture),
+                NeedCount.ToString(CultureInfo.InvariantCulture), N(NeedMean, "F3"), N(UsedMean, "F3"), N(GapMean, "F3"),
+            };
+            for (int b = 0; b < Scorecard.Bands; b++) { cells.Add(N(RateMean(b), "F2")); cells.Add(RateCount[b].ToString(CultureInfo.InvariantCulture)); }
+            cells.AddRange(new[]
+            {
+                Turns.ToString(CultureInfo.InvariantCulture), TurnsEnded.ToString(CultureInfo.InvariantCulture), TurnsDone.ToString(CultureInfo.InvariantCulture),
+                N(TurnSecondsMean, "F1"), N(TurnSpeedLostMean, "F2"), N(ShareMean, "F3"), ShareChanges.ToString(CultureInfo.InvariantCulture),
+                Holds.ToString(CultureInfo.InvariantCulture), N(HoldSeconds, "F1"), N(SpeedMean, "F2"), N(CurveMean, "F3"), N(PerShareMean, "F2"), N(WindMean, "F2"),
+                Saves.ToString(CultureInfo.InvariantCulture), N(UnsteeredSum, "F2"), N(UnsteeredWorst, "F2"), N(FrameAfterSave, "F0"),
+                Starts.ToString(CultureInfo.InvariantCulture), N(StartMean, "F1"), N(StartWorst, "F1"), N(SteerMs, "F1"), N(SteerWorst, "F2"),
+                N(NavMs, "F1"), N(NavWorst, "F2"), Plans.ToString(CultureInfo.InvariantCulture), N(PlanMs, "F1"), N(PlanWorst, "F2"),
+                Checks.ToString(CultureInfo.InvariantCulture), N(CheckMs, "F1"), N(Made / 1024.0, "F0"),
+            });
+            return string.Join("\t", cells.ToArray());
+        }
+
+        // The same in words, for the log.
+        internal string Describe()
+        {
+            var s = new StringBuilder();
+            s.Append(N(SteadySeconds, "F0")).Append(" of ").Append(N(Seconds, "F0")).Append(" s on a steady course, the bow ").Append(N(ErrorMean, "F1"))
+                .Append(" degrees off it on average, ").Append(N(ErrorWorst, "F1")).Append(" at worst; the helm ").Append(N(HelmMean, "F2")).Append(" of full on average, ")
+                .Append(Reversals).Append(" reversals; ");
+            if (NeedCount > 0)
+                s.Append("the sails' forces call for ").Append(N(NeedMean, "F2")).Append(" of helm against ").Append(N(UsedMean, "F2")).Append(" on, ")
+                    .Append(N(GapMean, "F2")).Append(" apart (").Append(NeedCount).Append(" samples); ");
+            s.Append("the turn rate for full helm");
+            for (int b = 0; b < Scorecard.Bands; b++)
+                s.Append(b == 0 ? " " : ", ").Append(RateCount[b] > 0 ? N(RateMean(b), "F1") + " (" + RateCount[b] + ")" : "-").Append(' ').Append(Scorecard.BandName(b));
+            s.Append("; tacks and wears ").Append(Turns).Append(" begun, ").Append(TurnsEnded).Append(" ended, ").Append(TurnsDone).Append(" done");
+            if (TurnsEnded > 0) s.Append(", ").Append(N(TurnSecondsMean, "F0")).Append(" s and ").Append(N(TurnSpeedLostMean, "F2")).Append(" m/s lost on average");
+            s.Append("; sail out ").Append(N(ShareMean, "F2")).Append(" on average, ").Append(ShareChanges).Append(" changes; holds ").Append(Holds).Append(", ")
+                .Append(N(HoldSeconds, "F0")).Append(" s; speed ").Append(N(SpeedMean, "F2")).Append(" m/s, the speed curve's share ").Append(N(CurveMean, "F2"))
+                .Append(", ").Append(N(PerShareMean, "F2")).Append(" m/s for its full share, the true wind ").Append(N(WindMean, "F1")).Append(" m/s");
+            if (Saves > 0 || NavigationMath.Finite(FrameAfterSave) && FrameAfterSave > 0)
+                s.Append("; saves ").Append(Saves).Append(", unsteered ").Append(N(UnsteeredSum, "F1")).Append(" s (").Append(N(UnsteeredWorst, "F1"))
+                    .Append(" at worst), the longest frame after one ").Append(N(FrameAfterSave, "F0")).Append(" ms");
+            if (Starts > 0) s.Append("; sailor starts ").Append(Starts).Append(", ").Append(N(StartMean, "F1")).Append(" ms on average (").Append(N(StartWorst, "F1")).Append(" at worst)");
+            s.Append("; cost: the steering ").Append(N(SteerMs, "F1")).Append(" ms (").Append(N(SteerWorst, "F2")).Append(" at worst), the navigation ").Append(N(NavMs, "F0"))
+                .Append(" ms (").Append(N(NavWorst, "F1")).Append(" at worst), the sails' plans ").Append(Plans).Append(", ").Append(N(PlanMs, "F0")).Append(" ms (")
+                .Append(N(PlanWorst, "F1")).Append(" at worst), the clearance checks ").Append(Checks).Append(", ").Append(N(CheckMs, "F0")).Append(" ms; managed memory made ")
+                .Append(N(Made / 1024.0, "F0")).Append(" KB");
+            return s.ToString();
+        }
+    }
+
+    // A tack or a wear as the scorecard keeps it: its kind, how it ended, whether a tack lost its way and wore, its seconds, the ship's speed at
+    // its start, the least in it and at its end, and the guide point's bearing and the ship's heading off the true wind (+ clockwise of it)
+    // before it and after.
+    internal sealed class TurnRecord
+    {
+        internal string Kind, Outcome;
+        internal bool LostWay;
+        internal double Seconds, SpeedStart, SpeedLeast, SpeedEnd = double.NaN, MarkBefore, HeadingBefore, MarkAfter = double.NaN, HeadingAfter = double.NaN;
+
+        private static string N(double value, string format) => NavigationMath.Finite(value) ? value.ToString(format, CultureInfo.InvariantCulture) : "-";
+
+        internal const string Header = "kind\toutcome\tlost_way\tseconds\tspeed_start\tspeed_least\tspeed_end\tmark_off_wind_before\theading_off_wind_before\tmark_off_wind_after\theading_off_wind_after";
+
+        internal string Row() => string.Join("\t", new[] { Kind, Outcome, LostWay ? "yes" : "no", N(Seconds, "F1"), N(SpeedStart, "F2"), N(SpeedLeast, "F2"), N(SpeedEnd, "F2"),
+            N(MarkBefore, "F0"), N(HeadingBefore, "F0"), N(MarkAfter, "F0"), N(HeadingAfter, "F0") });
+
+        internal string Describe() => "a " + Kind + (LostWay ? " that lost its way and wore" : "") + ", " + Outcome + " in " + N(Seconds, "F0") + " s, " + N(SpeedStart, "F2") +
+            " m/s at its start, " + N(SpeedLeast, "F2") + " the least, " + N(SpeedEnd, "F2") + " at its end; the guide point " + N(MarkBefore, "F0") + " degrees off the true wind before it (the heading " +
+            N(HeadingBefore, "F0") + "), " + N(MarkAfter, "F0") + " after it (the heading " + N(HeadingAfter, "F0") + ")";
+    }
+
+    // A voyage's scorecard: how steadily and how fast the ship sails and what it costs, summed per minute (closed by the minute line) and per voyage,
+    // from the samples the voyage gives it. A course counts as steady once it has stayed within SteadyBand degrees for SteadyAfter
+    // seconds with no turn, backing, irons, giving way or berthing. A helm reversal counts after ReversalStep of travel each way. The turn
+    // rate is sampled with the helm held within HeldBand for HeldFor seconds, at least RateHelm of it, not let go, RateSpeed or more ahead.
+    // A change of the sail out counts from ShareStep.
+    internal sealed class Scorecard
+    {
+        internal const int Bands = 4;
+        internal static readonly double[] BandTop = { 1.5, 2.5, 3.5, double.PositiveInfinity };
+        internal const double SteadyBand = 5, SteadyAfter = 5, ReversalStep = 0.05, HeldBand = 0.05, HeldFor = 1, RateHelm = 0.1, RateSpeed = 0.5, ShareStep = 0.05,
+            PerShareLeast = 0.3, AfterSave = 5;
+
+        internal static int Band(double speed)
+        {
+            for (int b = 0; b < Bands - 1; b++) if (speed < BandTop[b]) return b;
+            return Bands - 1;
+        }
+        internal static string BandName(int band) => band == 0 ? "under " + BandTop[0].ToString("F1", CultureInfo.InvariantCulture) + " m/s"
+            : band == Bands - 1 ? "from " + BandTop[Bands - 2].ToString("F1", CultureInfo.InvariantCulture) + " m/s"
+            : "to " + BandTop[band].ToString("F1", CultureInfo.InvariantCulture) + " m/s";
+
+        private readonly ScoreTotals[] both = { new ScoreTotals(), new ScoreTotals() };
+        // The minute running now, and the voyage's sums so far.
+        internal ScoreTotals Minute => both[0];
+        internal ScoreTotals Voyage => both[1];
+        // The last closed minute and how many have closed.
+        internal ScoreTotals LastMinute { get; private set; }
+        internal int MinuteCount { get; private set; }
+        // The last tack or wear ended and how many have ended.
+        internal TurnRecord LastTurn { get; private set; }
+        internal int TurnCount { get; private set; }
+        // On a steady course now.
+        internal bool Steady => steadyFor >= SteadyAfter;
+
+        private double steadyCourse = double.NaN, steadyFor, helmPivot = double.NaN, heldHelm = double.NaN, heldFor, lastShare = double.NaN;
+        private int helmWay;
+        private TurnRecord turn;
+        private double turnStart;
+        private int turnTacks;
+
+        // Each physics step the ship steers: `plain` when it sails a course with no turn, backing, irons, giving way or berthing under way; its
+        // course, the bow's error off it (degrees), the helm (signed, the game's rudder when let go), the turn rate (degrees a second, + to
+        // starboard) and the speed ahead.
+        internal void Steer(double dt, bool plain, double course, double error, double helm, double yawRate, double speed)
+        {
+            if (!(dt > 0) || !NavigationMath.Finite(helm)) return;
+            if (!plain || !NavigationMath.Finite(course)) { steadyCourse = double.NaN; steadyFor = 0; }
+            else if (double.IsNaN(steadyCourse) || Math.Abs(NavigationMath.Delta(steadyCourse, course)) > SteadyBand) { steadyCourse = course; steadyFor = 0; }
+            else steadyFor += dt;
+            bool steady = Steady && NavigationMath.Finite(error);
+            bool reversed = false;
+            if (double.IsNaN(helmPivot)) helmPivot = helm;
+            else if (helmWay == 0) { if (Math.Abs(helm - helmPivot) >= ReversalStep) { helmWay = Math.Sign(helm - helmPivot); helmPivot = helm; } }
+            else if ((helm - helmPivot) * helmWay > 0) helmPivot = helm;
+            else if ((helmPivot - helm) * helmWay >= ReversalStep) { reversed = true; helmWay = -helmWay; helmPivot = helm; }
+            if (double.IsNaN(heldHelm) || Math.Abs(helm - heldHelm) > HeldBand) { heldHelm = helm; heldFor = 0; }
+            else heldFor += dt;
+            bool rated = heldFor >= HeldFor && Math.Abs(helm) >= RateHelm && speed >= RateSpeed && NavigationMath.Finite(yawRate);
+            int band = Band(speed);
+            double rate = rated ? -yawRate / helm : 0;
+            for (int i = 0; i < 2; i++)
+            {
+                var t = both[i];
+                t.Seconds += dt; t.HelmSum += Math.Abs(helm) * dt;
+                if (reversed) t.Reversals++;
+                if (steady) { t.SteadySeconds += dt; t.ErrorSum += Math.Abs(error) * dt; t.ErrorWorst = Math.Max(t.ErrorWorst, Math.Abs(error)); }
+                if (rated) { t.RateSum[band] += rate; t.RateCount[band]++; }
+            }
+        }
+
+        // Off any steady course (a wait or hold in the navigation).
+        internal void Unsteady() { steadyCourse = double.NaN; steadyFor = 0; }
+
+        // The time of the steering and of the navigation step (ms), each physics step.
+        internal void SteerTime(double ms) { for (int i = 0; i < 2; i++) { both[i].SteerMs += ms; both[i].SteerWorst = Math.Max(both[i].SteerWorst, ms); } }
+        internal void NavTime(double ms) { for (int i = 0; i < 2; i++) { both[i].NavMs += ms; both[i].NavWorst = Math.Max(both[i].NavWorst, ms); } }
+
+        // Each sail plan: its time (ms), the sail out, and under way the speed ahead, the speed curve's share for the apparent wind and the true
+        // wind's speed; on a steady course the helm the sails' forces call for (NaN when unknown) and the helm on.
+        internal void Plan(double ms, double share, bool underWay, double speed, double curve, double wind, double need, double used)
+        {
+            bool changed = false;
+            if (NavigationMath.Finite(share))
+            {
+                if (double.IsNaN(lastShare)) lastShare = share;
+                else if (Math.Abs(share - lastShare) >= ShareStep) { changed = true; lastShare = share; }
+            }
+            bool needed = underWay && Steady && NavigationMath.Finite(need) && NavigationMath.Finite(used);
+            bool perShare = underWay && NavigationMath.Finite(curve) && curve >= PerShareLeast && NavigationMath.Finite(speed);
+            for (int i = 0; i < 2; i++)
+            {
+                var t = both[i];
+                t.Plans++; t.PlanMs += ms; t.PlanWorst = Math.Max(t.PlanWorst, ms);
+                if (NavigationMath.Finite(share)) { t.ShareSum += share; t.ShareCount++; }
+                if (changed) t.ShareChanges++;
+                if (underWay && NavigationMath.Finite(speed) && NavigationMath.Finite(curve) && NavigationMath.Finite(wind)) { t.SpeedCount++; t.SpeedSum += speed; t.CurveSum += curve; t.WindSum += wind; }
+                if (perShare) { t.PerShareCount++; t.PerShareSum += speed / curve; }
+                if (needed) { t.NeedCount++; t.NeedSum += need; t.UsedSum += used; t.GapSum += Math.Abs(need - used); }
+            }
+        }
+
+        // Each navigation decision: the manoeuvre, the tacks and wears done so far (TackNavigator.TackCount), the time (s), the speed ahead,
+        // and the guide point's bearing and the ship's heading off the true wind (+ clockwise of it). A tack or wear is kept from where the manoeuvre
+        // turns to it until it turns to anything else.
+        internal void Navigate(Manoeuvre state, int tackCount, double now, double speed, double markOff, double headingOff)
+        {
+            bool turning = state == Manoeuvre.Tacking || state == Manoeuvre.Wearing;
+            if (turn == null)
+            {
+                if (!turning) return;
+                turn = new TurnRecord { Kind = state == Manoeuvre.Tacking ? "tack" : "wear", SpeedStart = speed, SpeedLeast = speed, MarkBefore = markOff, HeadingBefore = headingOff };
+                turnStart = now; turnTacks = tackCount;
+                for (int i = 0; i < 2; i++) both[i].Turns++;
+                return;
+            }
+            if (turning)
+            {
+                if (NavigationMath.Finite(speed)) turn.SpeedLeast = Math.Min(turn.SpeedLeast, speed);
+                if (state == Manoeuvre.Wearing && turn.Kind == "tack") turn.LostWay = true;
+                return;
+            }
+            EndTurn(state == Manoeuvre.Blocked ? "blocked" : tackCount > turnTacks ? "done" : "given up", now, speed, markOff, headingOff);
+        }
+
+        // A tack or wear under way ends here (`why`: the sailor let go, a hold).
+        internal void Interrupted(string why, double now)
+        {
+            if (turn != null) EndTurn(why, now, double.NaN, double.NaN, double.NaN);
+        }
+
+        private void EndTurn(string outcome, double now, double speed, double markOff, double headingOff)
+        {
+            turn.Outcome = outcome; turn.Seconds = now - turnStart; turn.SpeedEnd = speed; turn.MarkAfter = markOff; turn.HeadingAfter = headingOff;
+            for (int i = 0; i < 2; i++)
+            {
+                var t = both[i];
+                t.TurnsEnded++; t.TurnSeconds += turn.Seconds; t.TurnSpeedLost += Math.Max(0, turn.SpeedStart - turn.SpeedLeast);
+                if (outcome == "done") t.TurnsDone++;
+            }
+            LastTurn = turn; TurnCount++; turn = null;
+        }
+
+        internal void Held() { for (int i = 0; i < 2; i++) both[i].Holds++; }
+        internal void Holding(double dt) { if (dt > 0) for (int i = 0; i < 2; i++) both[i].HoldSeconds += dt; }
+
+        // A game save while the ship is under way in physics, and the seconds it was unsteered after it.
+        internal void Saved(double unsteered)
+        {
+            for (int i = 0; i < 2; i++) { var t = both[i]; t.Saves++; t.UnsteeredSum += unsteered; t.UnsteeredWorst = Math.Max(t.UnsteeredWorst, unsteered); }
+        }
+        // A start of the sailor and its time (ms).
+        internal void Started(double ms)
+        {
+            for (int i = 0; i < 2; i++) { var t = both[i]; t.Starts++; t.StartMs += ms; t.StartWorst = Math.Max(t.StartWorst, ms); }
+        }
+        // A frame's length (ms) within AfterSave of a save.
+        internal void FrameAfterSave(double ms) { for (int i = 0; i < 2; i++) both[i].FrameAfterSave = Math.Max(both[i].FrameAfterSave, ms); }
+
+        // The clearance checks (how many, their ms) since the last call.
+        internal void Checked(int count, double ms) { for (int i = 0; i < 2; i++) { both[i].Checks += count; both[i].CheckMs += ms; } }
+        // The managed heap's growth across one of the voyage's ticks (bytes).
+        internal void Made(long bytes) { if (bytes > 0) for (int i = 0; i < 2; i++) both[i].Made += bytes; }
+
+        // Closes the minute running now: it becomes LastMinute.
+        internal ScoreTotals EndMinute()
+        {
+            LastMinute = both[0];
+            both[0] = new ScoreTotals();
+            MinuteCount++;
+            return LastMinute;
         }
     }
 
@@ -14136,7 +16144,7 @@ namespace ShipwrightAndTransport.Compat
         {
             if (!InService()) return true;
             __result = false;
-            reason = "She is in a shipwright's service.";
+            reason = "It is in a shipwright's service.";
             return false;
         }
 
@@ -14163,7 +16171,7 @@ namespace ShipwrightAndTransport.Compat
             if (!__state.Wheel) return;
             __state.Wheel.currentInput = __state.Input;
             Sailing.GameBindings.WheelLocked.SetValue(__state.Wheel, __state.Locked);
-            // Decision 132: a wheel the voyage has let go keeps its rudder where the game's push back put it, not where the pilot did.
+            // The rudder stays where the voyage set it, not where the pilot did.
             if (__state.Wheel.attachedRudder) { var spring = __state.Wheel.attachedRudder.spring; spring.targetPosition = __state.RudderTarget; __state.Wheel.attachedRudder.spring = spring; }
         }
 

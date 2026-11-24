@@ -186,7 +186,7 @@ namespace ShipwrightAndTransport
                 if (record == null)
                 {
                     // A sailing booking that fell back to paper (its voyage unreadable) for a ship not stored (review M10).
-                    if (!transport.tow) Log.Info(Ships.NameOf(transport.saveIndex) + "'s booking to " + transport.to + " ended; she wasn't stored, so she stays where she is.");
+                    if (!transport.tow) Log.Info(Ships.NameOf(transport.saveIndex) + "'s booking to " + transport.to + " ended; it wasn't stored, so it stays where it is.");
                     continue;
                 }
                 record.shipyard = transport.to;
@@ -338,9 +338,9 @@ namespace ShipwrightAndTransport
             Log.Info("Booked a tow of " + Ships.NameOf(index) + " from " + quote.OrderedAt.Name + " to " + quote.To.Name + ": the tug's " + quote.TugMiles +
                 " miles " + quote.TugFee + ", the tow's " + quote.TowMiles + " miles " + quote.TowFee + " (cargo worth " + quote.CargoUnits + " units; " +
                 Weights.Text(quote.MassLb, quote.CargoLb) + ", towed at " + quote.TowKnots.ToString("0.0", CultureInfo.InvariantCulture) + " knots), " +
-                Money.Short[quote.Currency] + "; she lies at (" + quote.At.x.ToString("F0", CultureInfo.InvariantCulture) + ", " +
-                quote.At.z.ToString("F0", CultureInfo.InvariantCulture) + "). The tug leaves on day " + GameClock.DayOf(clock.Depart) + ", reaches her on day " +
-                GameClock.DayOf(clock.Reach) + "; she arrives on day " + GameClock.DayOf(clock.Arrive) + " at the earliest.");
+                Money.Short[quote.Currency] + "; it lies at (" + quote.At.x.ToString("F0", CultureInfo.InvariantCulture) + ", " +
+                quote.At.z.ToString("F0", CultureInfo.InvariantCulture) + "). The tug leaves on day " + GameClock.DayOf(clock.Depart) + ", reaches it on day " +
+                GameClock.DayOf(clock.Reach) + "; it arrives on day " + GameClock.DayOf(clock.Arrive) + " at the earliest.");
             return true;
         }
 
@@ -380,11 +380,11 @@ namespace ShipwrightAndTransport
         // still be taken.
         private static string Lost(TransportRecord tow, PurchasableBoat boat)
         {
-            if (!boat) return "she is no longer in the game";
+            if (!boat) return "it is no longer in the game";
             var saveable = boat.GetComponent<SaveableObject>();
-            if (!saveable || !saveable.extraSetting || Compat.EconomyOverhaul.IsRented(tow.saveIndex)) return "she is no longer the player's";
+            if (!saveable || !saveable.extraSetting || Compat.EconomyOverhaul.IsRented(tow.saveIndex)) return "it is no longer the player's";
             var damage = boat.GetComponent<BoatDamage>();
-            if (damage && damage.sunk) return "she sank";
+            if (damage && damage.sunk) return "it sank";
             // While the world shifts the offset moves first and the ships a physics step later (FloatingOriginManager.NewShift,
             // inside GameState.waitingForShift), so a place measured then is 512 m off: no measure then, and only two checks in a
             // row past the buffer cancel.
@@ -395,7 +395,7 @@ namespace ShipwrightAndTransport
             farChecks[tow.saveIndex] = ++count;
             if (count < 2) return null;
             float metres = new Vector2(at.x - tow.atX, at.z - tow.atZ).magnitude;
-            return "she lies " + Mathf.RoundToInt(metres) + " m from her place at booking";
+            return "it lies " + Mathf.RoundToInt(metres) + " m from its place at booking";
         }
 
         // The tug leg is kept, the tow leg paid back in the coins paid ("Still pay for tug leg, return the towing fee").
@@ -467,7 +467,7 @@ namespace ShipwrightAndTransport
             farChecks.Remove(index);
             fullLogged.Remove(index);
             Log.Info("The tug took " + Ships.NameOf(index) + " (save index " + index + ") on hour " + pickupHour.ToString("F1", CultureInfo.InvariantCulture) +
-                " to slot " + slot + (tow.cratesTaken > 0 ? ", " + tow.cratesTaken + " item(s) in crates taken" : "") + "; she arrives in " + tow.to +
+                " to slot " + slot + (tow.cratesTaken > 0 ? ", " + tow.cratesTaken + " item(s) in crates taken" : "") + "; it arrives in " + tow.to +
                 " on day " + GameClock.DayOf(tow.arriveHour) + ".");
             Plugin.Instance.StartCoroutine(Teleporter.Move(boat, Parking.World(State.Save.parkingField, slot), Parking.Heading, false));
         }
@@ -686,12 +686,19 @@ namespace ShipwrightAndTransport
         // In game.
         internal static float Timescale => Sun.sun ? Sun.sun.initialTimescale : DefaultTimescale;
 
-        internal static float ExactBetween(Vector3 a, Vector3 b) => Exact(Vector3.Distance(a, b), Timescale);
+        // On the sea's plane: the game lowers a far island (and its port) by the earth's curve, km under the sea.
+        internal static float Flat(Vector3 a, Vector3 b)
+        {
+            float x = a.x - b.x, z = a.z - b.z;
+            return Mathf.Sqrt(x * x + z * z);
+        }
+
+        internal static float ExactBetween(Vector3 a, Vector3 b) => Exact(Flat(a, b), Timescale);
 
         internal static int BetweenShipyards(string a, string b)
         {
             var portA = Ports.ByName(a); var portB = Ports.ByName(b);
-            return portA && portB ? Round(Vector3.Distance(portA.transform.position, portB.transform.position), Timescale) : FromTable(a, b);
+            return portA && portB ? Round(Flat(portA.transform.position, portB.transform.position), Timescale) : FromTable(a, b);
         }
     }
 
